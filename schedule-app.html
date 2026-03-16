@@ -1,0 +1,2225 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>직원 스케줄 관리</title>
+
+  <!-- ① Firebase를 가장 먼저 동기 로드 -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+  <!-- ② React -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- ③ Babel (맨 마지막) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { margin: 0; background: #0F172A; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    #root { min-height: 100vh; }
+    input, select, textarea, button { font-family: inherit; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: #1E293B; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+    #loading {
+      position: fixed; inset: 0; background: #0F172A;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 9999;
+    }
+    .spinner {
+      width: 44px; height: 44px; border: 3px solid #334155;
+      border-top-color: #F59E0B; border-radius: 50%;
+      animation: spin 0.8s linear infinite; margin-bottom: 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p style="color:#64748B;font-family:sans-serif;font-size:14px;margin:0">로딩 중...</p>
+</div>
+<div id="root"></div>
+
+<!-- ④ Firebase 초기화 (CDN 로드 직후, 동기 실행) -->
+<script>
+  try {
+    const _fbApp = firebase.initializeApp({
+      apiKey:            "AIzaSyC4nV3vuz2IhDSfFJ435ue89m4IWk_cwcA",
+      authDomain:        "nobrand-c8c66.firebaseapp.com",
+      databaseURL:       "https://nobrand-c8c66-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId:         "nobrand-c8c66",
+      storageBucket:     "nobrand-c8c66.firebasestorage.app",
+      messagingSenderId: "898005403213",
+      appId:             "1:898005403213:web:e1fa7380e75d56f2553e04",
+    });
+    window.__FB_DB__ = firebase.database(_fbApp);
+  } catch(e) {
+    console.warn("Firebase 초기화 실패 (로컬 테스트 모드):", e.message);
+    window.__FB_DB__ = null;
+  }
+</script>
+
+<!-- ⑤ 앱 본체 (Babel JSX 변환) -->
+<script type="text/babel">
+
+const { useState, useEffect, useRef } = React;
+
+
+// ── Firebase ─────────────────────────────────────────────────────────────────
+const FB_PATH = "store_v1";
+// Firebase는 window.__FB_DB__에서 가져옴 (setup 화면에서 초기화됨)
+let db = null;
+const getDb = () => db || (db = window.__FB_DB__);
+const dbRef = (k) => getDb().ref(FB_PATH + "/" + k);
+
+const kv = {
+  save: (k, v) => dbRef(k).set(v),
+  load: async (k) => {
+    const snap = await dbRef(k).once("value");
+    return snap.exists() ? snap.val() : null;
+  },
+  listen: (k, cb) => {
+    const ref = dbRef(k);
+    ref.on("value", snap => cb(snap.exists() ? snap.val() : null));
+    return () => ref.off("value");
+  },
+};
+
+// ── utils ─────────────────────────────────────────────────────────────────────
+const A = (v) => Array.isArray(v) ? v : (v && typeof v === "object" ? Object.values(v) : []);
+const O = (v) => (v && typeof v === "object" && !Array.isArray(v)) ? v : {};
+const uid = () => "_" + Math.random().toString(36).slice(2,8);
+const toM = (t) => { try { const [h,m] = (t||"00:00").split(":").map(Number); return h*60+m; } catch(_){ return 0; } };
+const DOW = ["일","월","화","수","목","금","토"];
+const EXP = {0:"미이수",1:"견습",2:"보조",3:"독립",4:"마스터"};
+const EXP_C = {0:"#475569",1:"#F59E0B",2:"#38BDF8",3:"#10B981",4:"#A78BFA"};
+const COLS = ["#F59E0B","#38BDF8","#A78BFA","#10B981","#F87171","#FB923C","#34D399","#E879F9","#60A5FA","#C084FC","#4ADE80","#F472B6","#FACC15","#2DD4BF","#818CF8","#FCA5A5"];
+const RQS = { pending:{bg:"#FEF3C7",tx:"#92400E",lb:"대기"}, approved:{bg:"#D1FAE5",tx:"#065F46",lb:"승인"}, rejected:{bg:"#FEE2E2",tx:"#991B1B",lb:"반려"} };
+
+function dayLbl(ds) { try { const [y,m,d]=ds.split("-").map(Number); return DOW[new Date(y,m-1,d).getDay()]||""; } catch(_){ return ""; } }
+function plusDays(ds, n) { try { const [y,m,d]=ds.split("-").map(Number); const dt=new Date(y,m-1,d+n); return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0"); } catch(_){ return ds; } }
+function calcH(c) { if (!c||c.off||!c.start||!c.end) return 0; return Math.max(0, Math.round(((toM(c.end)-toM(c.start))/60-(c.brk||0))*10)/10); }
+function getCell(sched, eid, date) { return O(sched)[eid+"__"+date] || {start:"",end:"",brk:0,off:false}; }
+function empCanWork(emp, reqs) { return !reqs||reqs.length===0 || reqs.every(r => (O(emp.skills)[r.skillId]||0) >= r.minLevel); }
+function buildWeek(first) {
+  const base = first || new Date().toISOString().slice(0,10);
+  return Array.from({length:7}, (_,i) => {
+    const ds = i===0 ? base : plusDays(base,i);
+    const wk = ["토","일"].includes(dayLbl(ds));
+    return { id:"d"+i, label:dayLbl(ds), date:ds, shifts:[
+      {id:"s"+i+"a", name:"오픈",  start:wk?"10:00":"09:00", end:wk?"15:00":"14:00", color:"#F59E0B", minStaff:2, reqSkills:[]},
+      {id:"s"+i+"b", name:"미들",  start:wk?"14:00":"13:00", end:wk?"19:00":"18:00", color:"#38BDF8", minStaff:2, reqSkills:[]},
+      {id:"s"+i+"c", name:"마감",  start:wk?"18:00":"17:00", end:wk?"23:00":"22:00", color:"#A78BFA", minStaff:2, reqSkills:[]},
+    ]};
+  });
+}
+
+// ── defaults ─────────────────────────────────────────────────────────────────
+function defaults() {
+  return {
+    employees: [
+      {id:1,name:"김치혜",pin:"1001",color:COLS[0],skills:{},role:"staff"},
+      {id:2,name:"한영희",pin:"1002",color:COLS[1],skills:{},role:"staff"},
+      {id:3,name:"정인준",pin:"1003",color:COLS[2],skills:{},role:"staff"},
+      {id:4,name:"전혜원",pin:"1004",color:COLS[3],skills:{},role:"staff"},
+      {id:5,name:"김푸름",pin:"1005",color:COLS[4],skills:{},role:"staff"},
+      {id:6,name:"최장미",pin:"1006",color:COLS[5],skills:{},role:"staff"},
+      {id:7,name:"허재규",pin:"1007",color:COLS[6],skills:{},role:"staff"},
+      {id:8,name:"박지용",pin:"1008",color:COLS[7],skills:{},role:"staff"},
+      {id:9,name:"김규민",pin:"1009",color:COLS[8],skills:{},role:"staff"},
+      {id:10,name:"박지윤",pin:"1010",color:COLS[9],skills:{},role:"staff"},
+      {id:11,name:"이은호",pin:"1011",color:COLS[10],skills:{},role:"staff"},
+      {id:12,name:"박지원",pin:"1012",color:COLS[11],skills:{},role:"staff"},
+      {id:13,name:"박인주",pin:"1013",color:COLS[12],skills:{},role:"staff"},
+      {id:14,name:"이예슬",pin:"1014",color:COLS[13],skills:{},role:"staff"},
+      {id:15,name:"박준혁",pin:"1015",color:COLS[14],skills:{},role:"staff"},
+      {id:16,name:"차영재",pin:"0000",color:"#FACC15",skills:{},role:"manager"},
+    ],
+    skills: [
+      {id:"pos",cat:"운영",name:"카운터/POS"},
+      {id:"cook",cat:"주방",name:"조리/요리"},
+      {id:"hall",cat:"홀",name:"홀 서빙"},
+      {id:"mgr",cat:"운영",name:"오픈/마감"},
+    ],
+    trainItems: [
+      {id:"t1",cat:"기본",name:"근무 규정·복장 안내",desc:""},
+      {id:"t2",cat:"기본",name:"안전·위생 교육",desc:""},
+      {id:"t3",cat:"기본",name:"비상구·소화기 위치",desc:""},
+      {id:"t4",cat:"기본",name:"직원 연락망 공유",desc:""},
+      {id:"t5",cat:"홀",name:"테이블 번호·구역 파악",desc:""},
+      {id:"t6",cat:"홀",name:"서빙 순서·방법 숙지",desc:""},
+      {id:"t7",cat:"홀",name:"메뉴 전체 파악",desc:""},
+      {id:"t8",cat:"카운터",name:"POS 기본 조작",desc:""},
+      {id:"t9",cat:"카운터",name:"현금 정산 방법",desc:""},
+      {id:"t10",cat:"마감·관리",name:"오픈 체크리스트 실습",desc:""},
+      {id:"t11",cat:"마감·관리",name:"마감 체크리스트 실습",desc:""},
+      {id:"t12",cat:"마감·관리",name:"클레임 응대 교육",desc:""},
+    ],
+    trainProgress: {},
+    week: buildWeek(),
+    sched: {},
+    confirmedScheds: {},
+    reqs: [],
+    notices: [],
+    readBy: {},
+    cfg: {pin:"1234", reqStart:"", reqEnd:""},
+    hourLedger: {},
+  };
+}
+
+// ── styles ────────────────────────────────────────────────────────────────────
+const S = {
+  inp: {background:"#0F172A",border:"1px solid #334155",borderRadius:8,padding:"8px 12px",color:"#E2E8F0",fontSize:13,fontFamily:"sans-serif",outline:"none",width:"100%",boxSizing:"border-box"},
+  btnP: {background:"linear-gradient(135deg,#F59E0B,#D97706)",color:"#1C1917",fontWeight:700,fontFamily:"sans-serif",fontSize:13,padding:"10px 20px",borderRadius:10,border:"none",cursor:"pointer"},
+  btnA: {background:"linear-gradient(135deg,#F59E0B,#D97706)",color:"#1C1917",fontWeight:700,fontFamily:"sans-serif",fontSize:13,padding:"8px 14px",borderRadius:10,border:"none",cursor:"pointer"},
+  btnG: {background:"none",border:"1px solid #334155",color:"#94A3B8",fontFamily:"sans-serif",fontSize:12,padding:"6px 12px",borderRadius:8,cursor:"pointer"},
+  lbl: {display:"block",color:"#94A3B8",fontSize:11,fontFamily:"sans-serif",fontWeight:600,textTransform:"uppercase",letterSpacing:".05em",marginBottom:4},
+  card: {background:"#1E293B",borderRadius:12,border:"1px solid #334155",padding:16,marginBottom:10},
+};
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [data, setData] = useState(null);
+  const [me,   setMe]   = useState(null); // logged-in employee object
+
+  useEffect(() => {
+    // Firebase 실시간 리스너 — 모든 기기에서 데이터 동기화
+    const def = defaults();
+    const unsubs = [];
+
+    Object.keys(def).forEach(k => {
+      const unsub = kv.listen(k, val => {
+        setData(prev => {
+          // 첫 로드 시 defaults로 초기값 설정 후 Firebase에 저장
+          const current = prev || {...def};
+          if (val === null) { kv.save(k, def[k]); return {...current}; }
+          return {...current, [k]: val};
+        });
+      });
+      unsubs.push(unsub);
+    });
+
+    // 최초 로드 완료 보장 (리스너 연결 후 기본값 적용)
+    kv.load(Object.keys(def)[0]).then(v => {
+      if (v === null) {
+        // 완전히 새 DB — 기본값 전체 저장
+        const d = defaults();
+        Object.keys(d).forEach(k => kv.save(k, d[k]));
+      }
+    });
+
+    return () => unsubs.forEach(u => u && u());
+  }, []);
+
+  function upd(key, val) {
+    setData(p => ({...p, [key]: val}));
+    kv.save(key, val);
+  }
+
+  if (!data) return (
+    <div style={{minHeight:"100vh",background:"#0F172A",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <span style={{color:"#94A3B8",fontFamily:"sans-serif"}}>불러오는 중…</span>
+    </div>
+  );
+
+  if (!me) return <LoginScreen employees={A(data.employees)} onLogin={setMe}/>;
+
+  // 최신 직원 데이터 반영 (이름/색상 변경 등)
+  const emp = A(data.employees).find(e => e.id===me.id) || me;
+
+  if (emp.role === "manager") return <ManagerApp data={data} upd={upd} emp={emp} onLogout={()=>setMe(null)}/>;
+  return <StaffApp data={data} upd={upd} emp={emp} onLogout={()=>setMe(null)}/>;
+}
+
+// ── 통합 로그인 화면 ──────────────────────────────────────────────────────────
+function LoginScreen({employees, onLogin}) {
+  const [sel, setSel] = useState("");
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState(false);
+  function tryLogin() {
+    const emp = employees.find(e => e.name === sel);
+    if (emp && String(emp.pin) === String(pin)) { onLogin(emp); }
+    else setErr(true);
+  }
+  return (
+    <div style={{minHeight:"100vh",background:"#0F172A",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{maxWidth:300,width:"100%",background:"#1E293B",border:"1px solid #334155",borderRadius:16,padding:28}}>
+        <div style={{textAlign:"center",marginBottom:22}}>
+          <div style={{fontSize:44}}>🏪</div>
+          <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,fontSize:20,margin:"10px 0 4px"}}>로그인</h2>
+          <p style={{color:"#64748B",fontFamily:"sans-serif",fontSize:13,margin:0}}>이름 선택 후 PIN 입력</p>
+        </div>
+        <label style={{display:"block",color:"#94A3B8",fontSize:11,fontFamily:"sans-serif",fontWeight:600,textTransform:"uppercase",marginBottom:4}}>이름</label>
+        <select value={sel} onChange={e=>{setSel(e.target.value);setErr(false);}} style={{...S.inp,marginBottom:12}}>
+          <option value="">선택하세요</option>
+          {employees.map(e => <option key={e.id} value={e.name}>{e.name}{e.role==="manager"?" ⭐":""}</option>)}
+        </select>
+        <label style={{display:"block",color:"#94A3B8",fontSize:11,fontFamily:"sans-serif",fontWeight:600,textTransform:"uppercase",marginBottom:4}}>PIN</label>
+        <input type="password" value={pin} onChange={e=>{setPin(e.target.value);setErr(false);}} maxLength={6}
+          onKeyDown={e=>e.key==="Enter"&&tryLogin()}
+          style={{...S.inp,textAlign:"center",letterSpacing:8,fontSize:22,marginBottom:6}}/>
+        {err && <p style={{color:"#EF4444",textAlign:"center",fontSize:12,fontFamily:"sans-serif",margin:"0 0 8px"}}>이름 또는 PIN이 틀렸습니다</p>}
+        <button onClick={tryLogin} style={{...S.btnP,width:"100%",marginTop:8}}>로그인</button>
+      </div>
+    </div>
+  );
+}
+
+// ── 관리자 앱 ─────────────────────────────────────────────────────────────────
+function ManagerApp({data, upd, emp, onLogout}) {
+  const [tab, setTab] = useState("schedule");
+  const pending = A(data.reqs).filter(r => r.status==="pending").length;
+  const TABS = [
+    {id:"schedule",  lb:"📅 스케줄"},
+    {id:"timetable", lb:"🕐 타임테이블"},
+    {id:"employees", lb:"👥 직원"},
+    {id:"training",  lb:"📋 인수인계"},
+    {id:"notices",   lb:"📢 공지"},
+    {id:"requests",  lb:"📬 휴무" + (pending>0 ? ` (${pending})` : "")},
+    {id:"hours",     lb:"⏱ 시간관리"},
+    {id:"settings",  lb:"⚙️ 설정"},
+  ];
+  return (
+    <div style={{minHeight:"100vh",background:"#0F172A"}}>
+      <div style={{background:"#1E293B",borderBottom:"1px solid #334155",display:"flex",alignItems:"center",padding:"0 20px",height:50}}>
+        <span style={{color:"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:15,flex:1}}>🏪 관리자 — {emp.name}</span>
+        <button onClick={onLogout} style={S.btnG}>로그아웃</button>
+      </div>
+      <div style={{background:"#1E293B",borderBottom:"1px solid #334155",display:"flex",overflowX:"auto",padding:"0 12px"}}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{padding:"12px 10px",background:"none",border:"none",borderBottom:tab===t.id?"2px solid #F59E0B":"2px solid transparent",color:tab===t.id?"#F59E0B":"#64748B",fontFamily:"sans-serif",fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>
+            {t.lb}
+          </button>
+        ))}
+      </div>
+      <div style={{padding:20}}>
+        {tab==="schedule"  && <SchedTab  data={data} upd={upd}/>}
+        {tab==="timetable" && <TimeTab   data={data} upd={upd}/>}
+        {tab==="employees" && <EmpTab    data={data} upd={upd}/>}
+        {tab==="training"  && <TrainTab  data={data} upd={upd}/>}
+        {tab==="notices"   && <NoticeTab data={data} upd={upd}/>}
+        {tab==="requests"  && <ReqTab    data={data} upd={upd}/>}
+        {tab==="hours"     && <HourTab   data={data} upd={upd} mgr={emp}/>}
+        {tab==="settings"  && <SettTab   data={data} upd={upd}/>}
+      </div>
+    </div>
+  );
+}
+
+// ── 직원 앱 ───────────────────────────────────────────────────────────────────
+function StaffApp({data, upd, emp, onLogout}) {
+  const [tab, setTab] = useState("schedule");
+  const notices  = A(data.notices);
+  const readBy   = O(data.readBy);
+  const myReqs   = A(data.reqs).filter(r=>r.empId===emp.id&&r.status==="pending").length;
+  const unread   = notices.filter(n=>!A(readBy[n.id]).includes(emp.id)).length;
+  const canReq   = (() => { const c=O(data.cfg); if(!c.reqStart||!c.reqEnd)return true; const now=new Date(); return now>=new Date(c.reqStart)&&now<=new Date(c.reqEnd); })();
+
+  const TABS = [
+    {id:"schedule", lb:"📅 스케줄"},
+    {id:"notices",  lb:"📢 공지" + (unread>0?` (${unread})` :"")},
+    {id:"request",  lb:"📬 휴무" + (myReqs>0?` (${myReqs})`:"") + (canReq?"":" 🔒")},
+  ];
+  return (
+    <div style={{minHeight:"100vh",background:"#0F172A"}}>
+      <div style={{background:"#1E293B",borderBottom:"1px solid #334155",display:"flex",alignItems:"center",padding:"0 16px",height:50,gap:8}}>
+        <div style={{width:30,height:30,borderRadius:8,background:emp.color+"22",display:"flex",alignItems:"center",justifyContent:"center",color:emp.color,fontWeight:800,fontSize:14,fontFamily:"sans-serif",flexShrink:0}}>{emp.name[0]}</div>
+        <span style={{color:emp.color,fontWeight:700,fontFamily:"sans-serif",fontSize:15,flex:1}}>{emp.name}</span>
+        <button onClick={onLogout} style={{...S.btnG,fontSize:11}}>로그아웃</button>
+      </div>
+      <div style={{background:"#1E293B",borderBottom:"1px solid #334155",display:"flex",padding:"0 12px"}}>
+        {TABS.map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"12px 12px",background:"none",border:"none",borderBottom:tab===t.id?"2px solid #F59E0B":"2px solid transparent",color:tab===t.id?"#F59E0B":"#64748B",fontFamily:"sans-serif",fontSize:12,cursor:"pointer",whiteSpace:"nowrap"}}>
+            {t.lb}
+          </button>
+        ))}
+      </div>
+      <div style={{padding:20}}>
+        {tab==="schedule" && <StaffSchedView data={data} emp={emp}/>}
+        {tab==="notices"  && <StaffNoticeView data={data} upd={upd} emp={emp}/>}
+        {tab==="request"  && <StaffReqView data={data} upd={upd} emp={emp} canReq={canReq}/>}
+      </div>
+    </div>
+  );
+}
+
+// ── 공유 커버리지 그리드 ────────────────────────────────────────────────────────
+// slots: [{hourLabel, m, days: [{date, count, color, names:[]}]}]
+// mode: "timetable" | "schedule"
+// ── 공유 커버리지 그리드 ─────────────────────────────────────────────────────
+// props:
+//   week       : [{date, label, shifts:[]}]
+//   getCount   : (date, m) => {count, color, names:[{name,color}]}
+//   minM, maxM : 시간 범위 (분 단위)
+//   selDay     : 이름 펼쳐볼 날짜
+//   onDayClick : 헤더 클릭 콜백
+function CoverageGrid({week, getCount, minM, maxM, selDay, onDayClick}) {
+  if (minM >= maxM) return (
+    <div style={{background:"#0F172A",borderRadius:8,padding:12,textAlign:"center"}}>
+      <span style={{color:"#475569",fontFamily:"sans-serif",fontSize:11}}>근무 데이터 없음</span>
+    </div>
+  );
+
+  const slots = [];
+  for (let m = minM; m < maxM; m += 60) slots.push(m);
+  const fmtH = m => `${String(Math.floor(m/60)).padStart(2,"0")}:00`;
+
+  // 셀 최대값 (색 농도 기준)
+  const allCounts = [];
+  slots.forEach(m => week.forEach(d => { const r=getCount(d.date,m); allCounts.push(r.count); }));
+  const maxCount = Math.max(...allCounts, 1);
+
+  const TH = {fontFamily:"sans-serif",fontSize:10,fontWeight:700,color:"#64748B",textAlign:"center",padding:"4px 3px",whiteSpace:"nowrap",borderBottom:"1px solid #334155"};
+
+  return (
+    <div style={{overflowX:"auto",borderRadius:8,border:"1px solid #1E293B"}}>
+      <table style={{borderCollapse:"collapse",width:"100%",tableLayout:"fixed"}}>
+        <colgroup>
+          <col style={{width:40}}/>
+          {week.map(d => <col key={d.date} style={{width: selDay===d.date ? 100 : 44}}/>)}
+          <col style={{width:28}}/>
+        </colgroup>
+        <thead>
+          <tr style={{background:"#1A2535"}}>
+            <th style={{...TH,textAlign:"left",paddingLeft:6,color:"#475569",fontSize:9}}>시간</th>
+            {week.map(day => {
+              const wk  = ["토","일"].includes(day.label);
+              const sel = selDay === day.date;
+              return (
+                <th key={day.date} onClick={()=>onDayClick&&onDayClick(day.date)}
+                  style={{...TH,
+                    color: sel?"#F59E0B": wk?"#F87171":"#64748B",
+                    borderBottom: sel?"2px solid #F59E0B":"1px solid #334155",
+                    cursor: onDayClick?"pointer":"default",
+                    background: sel?"rgba(245,158,11,.08)":"transparent",
+                  }}>
+                  {day.label}
+                  {sel && <div style={{fontSize:8,color:"#F59E0B88",fontWeight:400}}>{day.date.slice(5)}</div>}
+                </th>
+              );
+            })}
+            <th style={{...TH,color:"#F59E0B",fontSize:9}}>↑</th>
+          </tr>
+        </thead>
+        <tbody>
+          {slots.map((m, ri) => {
+            const rowData = week.map(d => getCount(d.date, m));
+            const rowMax  = Math.max(...rowData.map(r=>r.count), 0);
+            return (
+              <tr key={m} style={{background:ri%2===0?"#0A0F18":"#0D1420"}}>
+                <td style={{padding:"0 6px",fontFamily:"sans-serif",fontSize:9,color:"#475569",whiteSpace:"nowrap",borderRight:"1px solid #1E293B"}}>
+                  {fmtH(m)}<span style={{color:"#334155"}}>~{fmtH(m+60)}</span>
+                </td>
+                {rowData.map((slot, di) => {
+                  const day = week[di];
+                  const sel = selDay === day.date;
+                  const c   = slot.color || "#64748B";
+                  const alpha = slot.count > 0 ? Math.round(30 + (slot.count/maxCount)*55) : 0;
+                  const bgHex = slot.count > 0 ? c + alpha.toString(16).padStart(2,"0") : "transparent";
+                  return (
+                    <td key={di} style={{
+                      background: bgHex,
+                      border: "1px solid " + (slot.count>0 ? c+"44" : "#1A2535"),
+                      padding: sel ? "2px 3px" : "1px",
+                      textAlign:"center", verticalAlign:"top",
+                      minHeight: 24,
+                    }}>
+                      {slot.count > 0 && (
+                        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:0}}>
+                          <span style={{color:c,fontWeight:800,fontFamily:"sans-serif",fontSize:12,lineHeight:1.3}}>{slot.count}</span>
+                          {sel && (slot.names||[]).map((n,ni)=>(
+                            <span key={ni} style={{
+                              color: n.color, fontSize:8, fontFamily:"sans-serif", fontWeight:600,
+                              whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+                              maxWidth:94, display:"block", lineHeight:1.4,
+                            }}>{n.name}</span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                  );
+                })}
+                <td style={{textAlign:"center",borderLeft:"1px solid #1E293B",padding:"1px 3px"}}>
+                  <span style={{color:rowMax>0?"#F59E0B":"#334155",fontWeight:700,fontFamily:"sans-serif",fontSize:11}}>{rowMax||""}</span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── Schedule Tab ──────────────────────────────────────────────────────────────
+function SchedTab({data, upd}) {
+  const [modal, setModal] = useState(null);
+  const [msg, setMsg] = useState("");
+  const [selDay, setSelDay] = useState(null); // 커버리지 강조 요일
+  const week = A(data.week); const emps = A(data.employees);
+  const sched = O(data.sched); const confirmed = O(data.confirmedScheds);
+  const reqs  = A(data.reqs);
+  const weekId = week[0]?.date || ""; const isConf = !!confirmed[weekId];
+
+  // sched 셀만 반환
+  function getDisplayCell(eid, date) {
+    return getCell(sched, eid, date);
+  }
+
+  // 종일 승인 휴무 여부 (시간 휴무는 해당 날 전체 잠금 안 함)
+  function isAllDayLeave(eid, date) {
+    return reqs.some(r => r.empId===eid && r.date===date && r.status==="approved" && r.allDay);
+  }
+
+  function setCell(eid, date, val) { upd("sched", {...sched, [eid+"__"+date]: val}); }
+  function empTotal(eid) { return week.reduce((s,d) => s + calcH(getDisplayCell(eid,d.date)), 0); }
+  function dayTotal(date) { return emps.reduce((s,e) => s + calcH(getDisplayCell(e.id,date)), 0); }
+
+  function autoGen() {
+    const MAX_H = 15;
+
+    // locked 셀 + 관리자가 직접 설정한 off 셀만 유지 (reqs는 별도 처리)
+    const ns = {};
+    Object.entries(sched).forEach(([k,v]) => { if (v.locked || (v.off && !v._fromReq)) ns[k] = v; });
+
+    // 승인된 reqs 분류
+    const approvedReqs = A(data.reqs).filter(r => r.status==="approved");
+    const allDayReqs   = approvedReqs.filter(r => r.allDay);
+    const partialReqs  = approvedReqs.filter(r => !r.allDay);
+
+    // 종일 휴무만 ns에 off 마킹
+    allDayReqs.forEach(r => {
+      const k = r.empId+"__"+r.date;
+      if (!ns[k]) ns[k] = {start:"", end:"", brk:0, off:true, _fromReq:true};
+    });
+
+    // 누적 근무시간 초기화 (locked 포함)
+    const th = {};
+    emps.forEach(e => { th[e.id] = 0; });
+    emps.forEach(e => {
+      week.forEach(d => {
+        const c = getCell(ns, e.id, d.date);
+        if (!c.off && c.start && c.end) th[e.id] += calcH(c);
+      });
+    });
+
+    // 종일 휴무 + 관리자 직접 off + 고정 휴무 → 하루 전체 배정 불가
+    const isFullDayOff = (e, date) => {
+      const dow = new Date(date).getDay();
+      if (A(e.fixedOff).includes(dow)) return true;
+      if (getCell(ns, e.id, date).off) return true;
+      return false;
+    };
+    // 시간 휴무 → 시프트 시간대가 겹치면 해당 시프트만 배정 불가
+    const shiftOverlapsPartialLeave = (e, date, sh) => {
+      const leaves = partialReqs.filter(r => r.empId===e.id && r.date===date);
+      if (!leaves.length) return false;
+      const sS = toM(sh.start), sE = toM(sh.end);
+      return leaves.some(r => toM(r.start) < sE && toM(r.end) > sS);
+    };
+
+    const isAssigned = (e, date) => { const c=getCell(ns,e.id,date); return !!(c.start||c.off||c.locked); };
+    const byHour = (a, b) => th[a.id] - th[b.id];
+
+    for (const d of week) {
+      const shifts = A(d.shifts);
+
+      // 스킬 조건이 까다로운 shift부터 먼저 처리
+      const sortedShifts = [...shifts].sort((a, b) => {
+        const free = e => !isAssigned(e,d.date) && !isFullDayOff(e,d.date) && !shiftOverlapsPartialLeave(e,d.date,a);
+        const qA = emps.filter(e => free(e) && empCanWork(e, A(a.reqSkills))).length;
+        const qB = emps.filter(e => free(e) && empCanWork(e, A(b.reqSkills))).length;
+        return qA - qB;
+      });
+
+      for (const sh of sortedShifts) {
+        const shH    = calcH({start:sh.start, end:sh.end, brk:sh.brk||0});
+        const needed = sh.minStaff || 1;
+        const locked = emps.filter(e => { const c=getCell(ns,e.id,d.date); return c.locked && c.start===sh.start && c.end===sh.end; }).length;
+        const toAssign = Math.max(0, needed - locked);
+        if (toAssign <= 0) continue;
+
+        // 종일 휴무 아니고, 아직 미배정이고, 이 시프트와 시간 휴무 안 겹치는 직원
+        const avail = emps.filter(e =>
+          !isAssigned(e,d.date) &&
+          !isFullDayOff(e,d.date) &&
+          !shiftOverlapsPartialLeave(e,d.date,sh)
+        );
+
+        // 4단계 우선순위: 스킬O+15h미달 → 스킬O+초과 → 스킬X+15h미달 → 스킬X+초과
+        const can   = e => empCanWork(e, A(sh.reqSkills));
+        const under = e => th[e.id] + shH <= MAX_H;
+        const p1 = avail.filter(e =>  can(e) &&  under(e)).sort(byHour);
+        const p2 = avail.filter(e =>  can(e) && !under(e)).sort(byHour);
+        const p3 = avail.filter(e => !can(e) &&  under(e)).sort(byHour);
+        const p4 = avail.filter(e => !can(e) && !under(e)).sort(byHour);
+
+        [...p1, ...p2, ...p3, ...p4].slice(0, toAssign).forEach(e => {
+          const isSub = !empCanWork(e, A(sh.reqSkills));
+          ns[e.id+"__"+d.date] = {start:sh.start, end:sh.end, brk:sh.brk||0, off:false, locked:false, substitute:isSub};
+          th[e.id] += shH;
+        });
+      }
+    }
+    upd("sched", ns);
+  }
+
+  function confirm() {
+    upd("confirmedScheds", {...confirmed, [weekId]: JSON.parse(JSON.stringify(sched))});
+    setMsg("✅ 직원에게 공개됐습니다"); setTimeout(() => setMsg(""), 3000);
+  }
+
+  function downloadExcel() {
+    const wb = XLSX.utils.book_new();
+
+    // ── 시트1: 주간 스케줄 ──
+    const header1 = ["직원", ...week.flatMap(d => [`${d.label} 출근`, `${d.label} 퇴근`, `${d.label} 휴식`, `${d.label} 시간`]), "합계(h)"];
+    const rows1 = emps.map(emp => {
+      const cells = week.flatMap(d => {
+        const c = getDisplayCell(emp.id, d.date);
+        if (isAllDayLeave(emp.id, d.date)) return ["","","",""];
+        if (c.off) return ["휴무","","",""];
+        if (!c.start) return ["","","",""];
+        const h = calcH(c);
+        return [c.start, c.end, c.brk ? `${c.brk}분` : "-", h];
+      });
+      return [emp.name, ...cells, empTotal(emp.id)];
+    });
+    // 날짜 행 추가
+    const dateRow = ["", ...week.flatMap(d => [d.date,"","",""]), ""];
+    const ws1 = XLSX.utils.aoa_to_sheet([header1, dateRow, ...rows1]);
+
+    // 열 너비
+    ws1["!cols"] = [
+      {wch:10},
+      ...week.flatMap(() => [{wch:8},{wch:8},{wch:6},{wch:6}]),
+      {wch:8}
+    ];
+    XLSX.utils.book_append_sheet(wb, ws1, "주간스케줄");
+
+    // ── 시트2: 일별 합계 ──
+    const header2 = ["날짜", "요일", "총 근무자", "총 근무시간(h)"];
+    const rows2 = week.map(d => {
+      const workers = emps.filter(e => calcH(getDisplayCell(e.id, d.date)) > 0).length;
+      return [d.date, d.label, workers, dayTotal(d.date)];
+    });
+    const ws2 = XLSX.utils.aoa_to_sheet([header2, ...rows2]);
+    ws2["!cols"] = [{wch:12},{wch:6},{wch:10},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws2, "일별요약");
+
+    // 파일명
+    const from = week[0]?.date || "";
+    const to   = week[6]?.date || "";
+    XLSX.writeFile(wb, `스케줄_${from}_${to}.xlsx`);
+  }
+
+  const TH = {border:"1px solid #475569",padding:"4px 6px",textAlign:"center",fontFamily:"sans-serif",fontSize:10,fontWeight:700,color:"#94A3B8",whiteSpace:"nowrap",background:"#1E293B"};
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <div>
+          <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>주간 스케줄</h2>
+          <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:"2px 0 0"}}>{week[0]?.date} ~ {week[6]?.date}</p>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={() => {
+            const kept = {};
+            // 관리자 직접 설정 off/locked 유지
+            Object.entries(sched).forEach(([k,v]) => { if ((v.off && !v._fromReq) || v.locked) kept[k] = v; });
+            // 승인된 종일 휴무만 off 마킹 (시간 휴무는 자동 생성 시 시프트 단위로 처리)
+            A(reqs).filter(r => r.status==="approved" && r.allDay).forEach(r => {
+              const k = r.empId+"__"+r.date;
+              if (!kept[k]) kept[k] = {start:"", end:"", brk:0, off:true, _fromReq:true};
+            });
+            upd("sched", kept);
+          }} style={{...S.btnG,fontSize:11}}>🗑 초기화</button>
+          <button onClick={downloadExcel} style={{...S.btnG,fontSize:11,color:"#10B981",border:"1px solid #10B981"}}>📥 엑셀 다운로드</button>
+          <button onClick={autoGen} style={S.btnA}>✨ 자동 생성</button>
+          <button onClick={confirm} style={{...S.btnA, background:isConf?"linear-gradient(135deg,#10B981,#059669)":"linear-gradient(135deg,#3B82F6,#2563EB)"}}>
+            {isConf ? "✅ 재확정" : "📌 확정 공개"}
+          </button>
+        </div>
+      </div>
+      {msg && <div style={{background:"#D1FAE5",border:"1px solid #A7F3D0",borderRadius:8,padding:10,marginBottom:10}}><p style={{color:"#065F46",fontWeight:700,fontFamily:"sans-serif",fontSize:13,margin:0}}>{msg}</p></div>}
+      <div style={{overflowX:"auto",borderRadius:10,border:"1px solid #334155"}}>
+        <table style={{borderCollapse:"collapse",minWidth:"max-content"}}>
+          <thead>
+            <tr>
+              <th rowSpan={2} style={{...TH,minWidth:72,position:"sticky",left:0,zIndex:3,borderRight:"2px solid #475569"}}>직원</th>
+              {week.map(day => {
+                const wk = ["토","일"].includes(day.label);
+                return <th key={day.id} colSpan={4} style={{...TH,background:wk?"#2D1A0A":"#1E293B",color:wk?"#F87171":"#94A3B8",padding:"5px 6px"}}>{day.label} {day.date.slice(5)}</th>;
+              })}
+              <th rowSpan={2} style={{...TH,minWidth:44,color:"#F59E0B",borderLeft:"2px solid #475569"}}>합계</th>
+            </tr>
+            <tr>
+              {week.map(day => {
+                const wk = ["토","일"].includes(day.label);
+                const sub = {...TH, background:wk?"#2D1A0A":"#162030", fontSize:9, padding:"2px 4px", color:"#64748B"};
+                return (
+                  <th key={day.id+"_s"} style={{display:"contents"}}>
+                    <th style={{...sub,minWidth:40}}>출근</th>
+                    <th style={{...sub,minWidth:40}}>퇴근</th>
+                    <th style={{...sub,minWidth:26}}>휴식</th>
+                    <th style={{...sub,minWidth:30,color:"#F59E0B"}}>시간</th>
+                  </th>
+                );
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {emps.map((emp, ei) => {
+              const tot = empTotal(emp.id); const over = tot >= 15;
+              return (
+                <tr key={emp.id} style={{background:ei%2===0?"#0A0F18":"#0D1420"}}>
+                  <td style={{background:ei%2===0?"#1A2535":"#1E293B",border:"1px solid #2D3748",borderRight:"2px solid #475569",padding:"4px 10px",position:"sticky",left:0,zIndex:1}}>
+                    <span style={{color:emp.color,fontWeight:700,fontFamily:"sans-serif",fontSize:12,whiteSpace:"nowrap"}}>{emp.role==="manager"?"⭐ ":""}{emp.name}</span>
+                  </td>
+                  {week.map(day => {
+                    const cell = getDisplayCell(emp.id, day.date); const h = calcH(cell);
+                    const wk = ["토","일"].includes(day.label);
+                    const isSub = cell.substitute && !cell.locked;
+                    // off 셀(종일 휴무) = 회색 잠금, 클릭 불가
+                    const isOff = cell.off || isAllDayLeave(emp.id, day.date);
+                    const bg = isOff
+                      ? "rgba(71,85,105,.2)"
+                      : isSub ? "rgba(239,68,68,.18)"
+                      : wk ? "rgba(239,68,68,.04)" : "transparent";
+                    const td = {background:bg, border:"1px solid #2D3748", padding:"3px 5px", textAlign:"center", fontSize:11, fontFamily:"sans-serif", cursor:isOff?"default":"pointer", whiteSpace:"nowrap"};
+                    const click = isOff ? undefined : () => setModal({emp, day, cell:{...cell}});
+                    if (isOff) return (
+                      <th key={day.id} style={{display:"contents"}}>
+                        <td style={td}></td>
+                        <td style={td}></td>
+                        <td style={td}></td>
+                        <td style={td}></td>
+                      </th>
+                    );
+                    return (
+                      <th key={day.id} style={{display:"contents"}}>
+                        <td style={{...td, color:isSub?"#F87171":"#CBD5E1", position:"relative"}} onClick={click}>
+                          {cell.locked && <span style={{position:"absolute",top:1,left:2,fontSize:7,color:"#F59E0B"}}>🔒</span>}
+                          {isSub       && <span style={{position:"absolute",top:0,left:1,fontSize:8,color:"#F87171",fontWeight:700,lineHeight:1}}>대체</span>}
+                          <span style={{display:"block",marginTop:isSub?10:0}}>{cell.start||<span style={{color:"#2D3748"}}>-</span>}</span>
+                        </td>
+                        <td style={{...td, color:isSub?"#F87171":"#CBD5E1"}} onClick={click}>{cell.end||<span style={{color:"#2D3748"}}>-</span>}</td>
+                        <td style={{...td, color:"#CBD5E1"}} onClick={click}>{cell.brk||""}</td>
+                        <td style={{...td, color:h>0?"#F59E0B":"#2D3748", fontWeight:h>0?700:400, cursor:"default"}}>{h||""}</td>
+                      </th>
+                    );
+                  })}
+                  <td style={{background:over?"rgba(239,68,68,.15)":"#1A2535",border:"1px solid #2D3748",borderLeft:"2px solid #475569",padding:"4px 8px",textAlign:"center"}}>
+                    <span style={{color:over?"#EF4444":"#F59E0B",fontWeight:700,fontFamily:"sans-serif",fontSize:12}}>{tot>0?tot+"h":""}{over?" ⚠":""}</span>
+                  </td>
+                </tr>
+              );
+            })}
+            <tr style={{borderTop:"2px solid #475569"}}>
+              <td style={{background:"#1E293B",border:"1px solid #475569",borderRight:"2px solid #475569",padding:"4px 10px",position:"sticky",left:0,zIndex:1}}>
+                <span style={{color:"#F59E0B",fontWeight:700,fontFamily:"sans-serif",fontSize:11}}>일별 합계</span>
+              </td>
+              {week.map(day => {
+                const tot = dayTotal(day.date);
+                return (
+                  <th key={day.id} style={{display:"contents"}}>
+                    <td style={{border:"1px solid #334155",background:"#1A2535"}}></td>
+                    <td style={{border:"1px solid #334155",background:"#1A2535"}}></td>
+                    <td style={{border:"1px solid #334155",background:"#1A2535"}}></td>
+                    <td style={{border:"1px solid #334155",background:"#1A2535",textAlign:"center"}}>
+                      <span style={{color:"#94A3B8",fontFamily:"sans-serif",fontSize:11,fontWeight:700}}>{tot>0?tot+"h":""}</span>
+                    </td>
+                  </th>
+                );
+              })}
+              <td style={{background:"#1A2535",border:"1px solid #475569",borderLeft:"2px solid #475569",padding:"4px 8px",textAlign:"center"}}>
+                <span style={{color:"#94A3B8",fontFamily:"sans-serif",fontSize:11,fontWeight:700}}>{emps.reduce((s,e)=>s+empTotal(e.id),0)||""}h</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {modal && <CellModal emp={modal.emp} day={modal.day} initCell={modal.cell} onSave={val=>{setCell(modal.emp.id,modal.day.date,val);setModal(null);}} onClose={()=>setModal(null)}/>}
+
+      {/* ── 커버리지 그리드 (스케줄 기반) ── */}
+      {(()=>{
+        let minM=24*60, maxM=0;
+        week.forEach(d=>{
+          const dayShifts=A((data.week||[]).find(w=>w.date===d.date)?.shifts);
+          dayShifts.forEach(sh=>{ if(sh.start)minM=Math.min(minM,toM(sh.start)); if(sh.end)maxM=Math.max(maxM,toM(sh.end)); });
+          emps.forEach(e=>{ const c=getDisplayCell(e.id,d.date); if(c.start&&!c.off){minM=Math.min(minM,toM(c.start));maxM=Math.max(maxM,toM(c.end));} });
+        });
+        if(minM>=maxM) return null;
+        function getCount(date, m) {
+          const dayObj=(data.week||[]).find(w=>w.date===date);
+          const sh=A(dayObj?.shifts).find(s=>toM(s.start)<=m&&toM(s.end)>m);
+          const active=emps.filter(e=>{ const c=getDisplayCell(e.id,date); return !c.off&&c.start&&toM(c.start)<=m&&toM(c.end)>m; });
+          return {count:active.length, color:sh?.color||"#64748B", names:active.map(e=>({name:e.name,color:e.color}))};
+        }
+        return (
+          <div style={{marginTop:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+              <p style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",fontWeight:700,margin:0}}>📊 커버리지</p>
+              <p style={{color:"#475569",fontSize:10,fontFamily:"sans-serif",margin:0}}>— 요일 클릭 시 이름 표시{selDay?" (클릭해서 숨기기)":""}</p>
+            </div>
+            <CoverageGrid week={week} getCount={getCount} minM={minM} maxM={maxM}
+              selDay={selDay} onDayClick={d=>setSelDay(selDay===d?null:d)}/>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+function CellModal({emp, day, initCell, onSave, onClose}) {
+  const [start, setStart] = useState(initCell.start||"");
+  const [end,   setEnd]   = useState(initCell.end||"");
+  const [brk,   setBrk]   = useState(initCell.brk||0);
+  const [off,   setOff]   = useState(!!initCell.off);
+  const [locked,setLocked]= useState(!!initCell.locked);
+  const h = off ? 0 : calcH({start, end, brk});
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16}}>
+      <div style={{...S.card,width:"100%",maxWidth:300,margin:0}}>
+        <div style={{display:"flex",alignItems:"center",marginBottom:14}}>
+          <span style={{color:emp.color,fontWeight:700,fontFamily:"sans-serif",fontSize:14,flex:1}}>{emp.name} — {day.label} {day.date.slice(5)}</span>
+          <button onClick={onClose} style={{background:"none",border:"none",color:"#64748B",fontSize:20,cursor:"pointer",padding:0}}>✕</button>
+        </div>
+        <label style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,cursor:"pointer"}}>
+          <input type="checkbox" checked={off} onChange={e=>setOff(e.target.checked)}/>
+          <span style={{color:"#F59E0B",fontFamily:"sans-serif",fontSize:13,fontWeight:700}}>종일 휴무</span>
+        </label>
+        {!off && (
+          <>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+              <div><label style={S.lbl}>출근</label><input type="time" value={start} onChange={e=>setStart(e.target.value)} style={S.inp}/></div>
+              <div><label style={S.lbl}>퇴근</label><input type="time" value={end}   onChange={e=>setEnd(e.target.value)}   style={S.inp}/></div>
+              <div>
+                <label style={S.lbl}>휴식(h)</label>
+                <select value={brk} onChange={e=>setBrk(Number(e.target.value))} style={S.inp}>
+                  {[0,0.5,1,1.5].map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              {h>0 && <div style={{display:"flex",alignItems:"flex-end",paddingBottom:4}}><span style={{color:"#F59E0B",fontWeight:800,fontFamily:"sans-serif",fontSize:22}}>{h}h</span></div>}
+            </div>
+            <label style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,cursor:"pointer",background:locked?"rgba(245,158,11,.1)":"#0F172A",border:"1px solid "+(locked?"#F59E0B44":"#334155"),borderRadius:8,padding:"8px 12px"}}>
+              <input type="checkbox" checked={locked} onChange={e=>setLocked(e.target.checked)}/>
+              <span style={{color:locked?"#F59E0B":"#64748B",fontFamily:"sans-serif",fontSize:12,fontWeight:700}}>🔒 자동 생성에서 고정 (이 직원 이 시간 유지)</span>
+            </label>
+          </>
+        )}
+        <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+          <button onClick={()=>onSave({start:"",end:"",brk:0,off:false,locked:false})} style={{...S.btnG,color:"#EF4444",fontSize:11}}>초기화</button>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={onClose} style={S.btnG}>취소</button>
+            <button onClick={()=>onSave(off ? {start:"",end:"",brk:0,off:true,locked:false} : {start,end,brk,off:false,locked})} style={S.btnA}>저장</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Timetable Tab ─────────────────────────────────────────────────────────────
+function TimeTab({data, upd}) {
+  const [open,     setOpen]     = useState(null);
+  const [copyFrom, setCopyFrom] = useState(null);
+  const [copyTo,   setCopyTo]   = useState([]);
+  const week   = A(data.week);
+  const skills = A(data.skills);
+
+  function setFirst(nd) {
+    upd("week", Array.from({length:7}, (_,i) => {
+      const ds = i===0 ? nd : plusDays(nd,i); const old = week[i]||{};
+      return {...old, id:"d"+i, label:dayLbl(ds), date:ds, shifts:A(old.shifts)};
+    }));
+  }
+  function updShift(di, si, p) {
+    upd("week", week.map((d,i) => i!==di ? d : {...d, shifts:A(d.shifts).map((sh,j) => j!==si ? sh : {...sh,...p})}));
+  }
+  function addShift(di) {
+    upd("week", week.map((d,i) => i!==di ? d : {...d, shifts:[...A(d.shifts),{id:uid(),name:"새 근무",start:"09:00",end:"14:00",color:"#F59E0B",minStaff:1,reqSkills:[]}]}));
+  }
+  function delShift(di, si) {
+    upd("week", week.map((d,i) => i!==di ? d : {...d, shifts:A(d.shifts).filter((_,j) => j!==si)}));
+  }
+  function doCopy() {
+    if (copyFrom===null || !copyTo.length) return;
+    const src = week[copyFrom];
+    upd("week", week.map((d,i) => copyTo.includes(i) ? {...d, shifts:A(src.shifts).map(sh=>({...sh,id:uid()}))} : d));
+    setCopyFrom(null); setCopyTo([]);
+  }
+  function addReq(di, si, skillId) {
+    const sh = week[di].shifts[si];
+    if (A(sh.reqSkills).some(r => r.skillId===skillId)) return;
+    updShift(di, si, {reqSkills:[...A(sh.reqSkills), {skillId, minLevel:1}]});
+  }
+  function rmReq(di, si, skillId) {
+    updShift(di, si, {reqSkills:A(week[di].shifts[si].reqSkills).filter(r => r.skillId!==skillId)});
+  }
+  function setReqLv(di, si, skillId, lv) {
+    updShift(di, si, {reqSkills:A(week[di].shifts[si].reqSkills).map(r => r.skillId===skillId ? {...r,minLevel:lv} : r)});
+  }
+
+  // ── 커버리지 차트 계산 ──
+  // 각 시간대(30분 단위)에 어떤 shift가 겹치는지
+  function buildChart(day) {
+    const shifts = A(day.shifts);
+    if (!shifts.length) return [];
+    const allMins = shifts.flatMap(sh => [toM(sh.start), toM(sh.end)]).filter(Boolean);
+    const minH = Math.min(...allMins), maxH = Math.max(...allMins);
+    const slots = [];
+    for (let m = minH; m < maxH; m += 30) {
+      const label = `${String(Math.floor(m/60)).padStart(2,"0")}:${m%60===0?"00":"30"}`;
+      const active = shifts.filter(sh => toM(sh.start) <= m && toM(sh.end) > m);
+      slots.push({label, m, active});
+    }
+    return slots;
+  }
+
+  const SCOLS = ["#F59E0B","#38BDF8","#A78BFA","#10B981","#F87171","#FB923C"];
+
+  function downloadExcel() {
+    const wb = XLSX.utils.book_new();
+    week.forEach(day => {
+      const shifts = A(day.shifts);
+      if (!shifts.length) return;
+      const header = ["근무명","출근","퇴근","휴식(h)","근무시간(h)","최소인원","필요스킬"];
+      const rows = shifts.map(sh => {
+        const h = calcH({start:sh.start, end:sh.end, brk:sh.brk||0});
+        const skillNames = A(sh.reqSkills).map(r => {
+          const sk = A(data.skills).find(s => s.id===r.skillId);
+          return sk ? `${sk.name}(Lv${r.minLevel})` : r.skillId;
+        }).join(", ");
+        return [sh.name, sh.start, sh.end, sh.brk||0, h, sh.minStaff||1, skillNames];
+      });
+      const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+      ws["!cols"] = [{wch:12},{wch:8},{wch:8},{wch:8},{wch:10},{wch:8},{wch:24}];
+      XLSX.utils.book_append_sheet(wb, ws, `${day.label}(${day.date.slice(5)})`);
+    });
+    const from = week[0]?.date || "";
+    const to   = week[6]?.date || "";
+    XLSX.writeFile(wb, `타임테이블_${from}_${to}.xlsx`);
+  }
+
+  return (
+    <div>
+      {/* 헤더 */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <div>
+          <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>타임테이블</h2>
+          <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:"2px 0 0"}}>근무별 시간·인원·필요 스킬 → 자동 생성에 반영</p>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <button onClick={downloadExcel} style={{...S.btnG,fontSize:11,color:"#10B981",border:"1px solid #10B981"}}>📥 엑셀 다운로드</button>
+          <input type="date" value={week[0]?.date||""} onChange={e=>setFirst(e.target.value)} style={{...S.inp,width:160}}/>
+        </div>
+      </div>
+
+      {/* 복사 모달 */}
+      {copyFrom!==null && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16}}>
+          <div style={{...S.card,width:"100%",maxWidth:340,margin:0}}>
+            <p style={{color:"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:15,margin:"0 0 6px"}}>
+              📋 {week[copyFrom]?.label}요일 → 복사할 요일 선택
+            </p>
+            <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:"0 0 14px"}}>선택한 요일의 근무가 덮어씌워집니다</p>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:16}}>
+              {week.map((d,i) => {
+                if (i===copyFrom) return null;
+                const sel = copyTo.includes(i);
+                const wk  = ["토","일"].includes(d.label);
+                return (
+                  <button key={i} onClick={()=>setCopyTo(sel ? copyTo.filter(x=>x!==i) : [...copyTo,i])}
+                    style={{padding:"10px 14px",borderRadius:10,border:"2px solid "+(sel?(wk?"#F87171":"#38BDF8"):"#334155"),background:sel?(wk?"rgba(248,113,113,.15)":"rgba(56,189,248,.15)"):"#0F172A",cursor:"pointer",textAlign:"center"}}>
+                    <p style={{color:wk?"#F87171":"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:14,margin:0}}>{d.label}</p>
+                    <p style={{color:"#64748B",fontSize:10,fontFamily:"sans-serif",margin:"2px 0 0"}}>{d.date.slice(5)}</p>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>{setCopyFrom(null);setCopyTo([]);}} style={S.btnG}>취소</button>
+              <button onClick={doCopy} disabled={!copyTo.length} style={{...S.btnA,opacity:copyTo.length?1:0.4}}>
+                복사 ({copyTo.length}개 요일)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 편집 뷰 ── */}
+      {week.map((day, di) => {
+        const wk = ["토","일"].includes(day.label); const isOpen = open===di;
+        const shifts = A(day.shifts);
+
+        // 이 요일의 커버리지 범위
+        let ttMinM=24*60, ttMaxM=0;
+        shifts.forEach(sh=>{ if(sh.start)ttMinM=Math.min(ttMinM,toM(sh.start)); if(sh.end)ttMaxM=Math.max(ttMaxM,toM(sh.end)); });
+        const hasCoverage = ttMinM < ttMaxM;
+
+        function getTTCount(date, m) {
+          const active = shifts.filter(sh=>toM(sh.start)<=m&&toM(sh.end)>m);
+          const count  = active.reduce((s,sh)=>s+(sh.minStaff||1),0);
+          // 여러 shift 혼재 시 첫 번째 색상 사용
+          return {count, color: active[0]?.color||"#64748B", names:[]};
+        }
+
+        // 이 요일만 week 형태로 래핑
+        const singleWeek = [{...day}];
+
+        return (
+          <div key={day.id} style={{...S.card,padding:0,overflow:"hidden",marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",cursor:"pointer",borderBottom:isOpen?"1px solid #334155":"none"}} onClick={()=>setOpen(isOpen?null:di)}>
+              <span style={{color:wk?"#F87171":"#38BDF8",fontWeight:800,fontSize:16,fontFamily:"sans-serif",minWidth:28}}>{day.label}</span>
+              <span style={{color:"#475569",fontSize:12,fontFamily:"sans-serif",flex:1}}>{day.date} · {shifts.length}개 근무</span>
+              {!isOpen && shifts.length>0 && (
+                <div style={{display:"flex",gap:3}}>
+                  {shifts.map(sh=>(
+                    <span key={sh.id} style={{background:sh.color+"33",color:sh.color,fontSize:9,fontWeight:700,fontFamily:"sans-serif",padding:"2px 6px",borderRadius:4,whiteSpace:"nowrap"}}>
+                      {sh.name} {sh.start}~{sh.end} ×{sh.minStaff||1}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <button onClick={e=>{e.stopPropagation();setCopyFrom(di);setCopyTo([]);}} style={{...S.btnG,fontSize:11,padding:"3px 10px"}}>📋 복사</button>
+              <span style={{color:"#64748B",fontSize:12}}>{isOpen?"▲":"▼"}</span>
+            </div>
+
+            {isOpen && (
+              <div style={{padding:12}}>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:8,marginBottom:hasCoverage?16:0}}>
+                  {shifts.map((sh, si) => {
+                    const reqSkills = A(sh.reqSkills);
+                    return (
+                      <div key={sh.id} style={{background:"#0F172A",borderRadius:10,border:"1.5px solid "+sh.color+"55",padding:10}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
+                          <div style={{width:8,height:8,borderRadius:99,background:sh.color,flexShrink:0}}/>
+                          <input value={sh.name} onChange={e=>updShift(di,si,{name:e.target.value})} style={{...S.inp,flex:1,padding:"3px 8px",fontSize:12,background:"transparent",border:"none",color:sh.color,fontWeight:700}}/>
+                          <button onClick={()=>delShift(di,si)} style={{background:"none",border:"none",color:"#475569",cursor:"pointer",fontSize:13,padding:0}}>✕</button>
+                        </div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                          <div><label style={S.lbl}>시작</label><input type="time" value={sh.start} onChange={e=>updShift(di,si,{start:e.target.value})} style={S.inp}/></div>
+                          <div><label style={S.lbl}>종료</label><input type="time" value={sh.end}   onChange={e=>updShift(di,si,{end:e.target.value})}   style={S.inp}/></div>
+                          <div>
+                            <label style={S.lbl}>휴식 (h)</label>
+                            <select value={sh.brk||0} onChange={e=>updShift(di,si,{brk:Number(e.target.value)})} style={S.inp}>
+                              {[0,0.5,1,1.5,2].map(v=><option key={v} value={v}>{v===0?"없음":v+"h"}</option>)}
+                            </select>
+                          </div>
+                          <div style={{display:"flex",alignItems:"flex-end",paddingBottom:2}}>
+                            <span style={{color:"#475569",fontSize:11,fontFamily:"sans-serif"}}>실근무 <span style={{color:"#F59E0B",fontWeight:700}}>{calcH({start:sh.start,end:sh.end,brk:sh.brk||0})}h</span></span>
+                          </div>
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                          <span style={S.lbl}>최소 인원</span>
+                          <button onClick={()=>updShift(di,si,{minStaff:Math.max(1,(sh.minStaff||1)-1)})} style={{background:"#1E293B",border:"1px solid #334155",color:"#94A3B8",fontFamily:"sans-serif",fontSize:14,padding:"2px 9px",borderRadius:5,cursor:"pointer"}}>−</button>
+                          <span style={{color:"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",minWidth:16,textAlign:"center"}}>{sh.minStaff||1}</span>
+                          <button onClick={()=>updShift(di,si,{minStaff:(sh.minStaff||1)+1})} style={{background:"#1E293B",border:"1px solid #334155",color:"#94A3B8",fontFamily:"sans-serif",fontSize:14,padding:"2px 9px",borderRadius:5,cursor:"pointer"}}>+</button>
+                          <div style={{marginLeft:"auto",display:"flex",gap:4}}>
+                            {SCOLS.map(c => <button key={c} onClick={()=>updShift(di,si,{color:c})} style={{width:16,height:16,borderRadius:99,background:c,border:sh.color===c?"2px solid #fff":"2px solid transparent",cursor:"pointer",padding:0}}/>)}
+                          </div>
+                        </div>
+                        <label style={S.lbl}>필요 스킬</label>
+                        {reqSkills.map(req => {
+                          const sk = skills.find(s=>s.id===req.skillId); if (!sk) return null;
+                          return (
+                            <div key={req.skillId} style={{display:"flex",alignItems:"center",gap:6,background:"#1E293B",borderRadius:6,padding:"4px 8px",marginBottom:3}}>
+                              <span style={{color:"#CBD5E1",fontSize:11,fontFamily:"sans-serif",flex:1}}>{sk.name}</span>
+                              <select value={req.minLevel} onChange={e=>setReqLv(di,si,req.skillId,Number(e.target.value))} style={{...S.inp,width:80,padding:"3px 6px",fontSize:10}}>
+                                {[1,2,3,4].map(lv => <option key={lv} value={lv}>{EXP[lv]}</option>)}
+                              </select>
+                              <button onClick={()=>rmReq(di,si,req.skillId)} style={{background:"none",border:"none",color:"#EF4444",cursor:"pointer",fontSize:13,padding:0}}>✕</button>
+                            </div>
+                          );
+                        })}
+                        <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>
+                          {skills.filter(sk=>!reqSkills.some(r=>r.skillId===sk.id)).map(sk => (
+                            <button key={sk.id} onClick={()=>addReq(di,si,sk.id)} style={{background:"#1E293B",border:"1px dashed #334155",borderRadius:5,padding:"2px 8px",color:"#64748B",fontSize:10,cursor:"pointer",fontFamily:"sans-serif"}}>+ {sk.name}</button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <button onClick={()=>addShift(di)} style={{border:"2px dashed #334155",borderRadius:10,padding:16,background:"none",color:"#475569",fontFamily:"sans-serif",fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",minHeight:60}}>
+                    + 근무 추가
+                  </button>
+                </div>
+
+                {/* ── 인라인 커버리지 (컴팩트) ── */}
+                {hasCoverage && (
+                  <div style={{borderTop:"1px solid #1E293B",paddingTop:10}}>
+                    <p style={{color:"#64748B",fontSize:10,fontFamily:"sans-serif",fontWeight:700,margin:"0 0 6px"}}>📊 시간대별 필요 인원</p>
+                    <CoverageGrid
+                      week={singleWeek}
+                      getCount={getTTCount}
+                      minM={ttMinM} maxM={ttMaxM}
+                      selDay={null} onDayClick={null}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Employees Tab ─────────────────────────────────────────────────────────────
+function EmpTab({data, upd}) {
+  const [exp, setExp] = useState(null);
+  const [nn, setNn] = useState(""); const [np, setNp] = useState("");
+  const emps = A(data.employees); const skills = A(data.skills);
+
+  function add() {
+    if (!nn.trim()) return;
+    upd("employees", [...emps, {id:Date.now(), name:nn.trim(), pin:np||String(emps.length+1).padStart(4,"0"), color:COLS[emps.length%COLS.length], skills:{}, role:"staff"}]);
+    setNn(""); setNp("");
+  }
+  function upE(id, p) { upd("employees", emps.map(e => e.id===id ? {...e,...p} : e)); }
+  function del(id)    { upd("employees", emps.filter(e => e.id!==id)); }
+  function move(idx, dir) {
+    const ni = idx + dir;
+    if (ni < 0 || ni >= emps.length) return;
+    const arr = [...emps];
+    [arr[idx], arr[ni]] = [arr[ni], arr[idx]];
+    upd("employees", arr);
+  }
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>직원 ({emps.length}명)</h2>
+        <div style={{display:"flex",gap:8}}>
+          <input placeholder="이름" value={nn} onChange={e=>setNn(e.target.value)} onKeyDown={e=>e.key==="Enter"&&add()} style={{...S.inp,width:90}}/>
+          <input placeholder="PIN" value={np} onChange={e=>setNp(e.target.value)} maxLength={6} style={{...S.inp,width:80}}/>
+          <button onClick={add} style={S.btnA}>+ 추가</button>
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(340px,1fr))",gap:8}}>
+        {emps.map((emp, idx) => (
+          <div key={emp.id} style={{...S.card,padding:0,overflow:"hidden",border:"1px solid "+emp.color+"44"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",cursor:"pointer"}} onClick={()=>setExp(exp===emp.id?null:emp.id)}>
+              {/* 순서 버튼 */}
+              <div style={{display:"flex",flexDirection:"column",gap:2,flexShrink:0}} onClick={e=>e.stopPropagation()}>
+                <button onClick={()=>move(idx,-1)} disabled={idx===0} style={{background:"none",border:"1px solid #334155",borderRadius:4,color:idx===0?"#334155":"#94A3B8",fontSize:10,padding:"1px 5px",cursor:idx===0?"default":"pointer",lineHeight:1}}>▲</button>
+                <button onClick={()=>move(idx,+1)} disabled={idx===emps.length-1} style={{background:"none",border:"1px solid #334155",borderRadius:4,color:idx===emps.length-1?"#334155":"#94A3B8",fontSize:10,padding:"1px 5px",cursor:idx===emps.length-1?"default":"pointer",lineHeight:1}}>▼</button>
+              </div>
+              <div style={{width:34,height:34,borderRadius:8,background:emp.color+"22",display:"flex",alignItems:"center",justifyContent:"center",color:emp.color,fontWeight:800,fontSize:15,fontFamily:"sans-serif",flexShrink:0}}>{emp.name[0]}</div>
+              <div style={{flex:1}}>
+                <span style={{color:emp.color,fontWeight:700,fontSize:13,fontFamily:"sans-serif"}}>{emp.name}</span>
+                {emp.role==="manager" && <span style={{background:"rgba(168,85,247,.2)",color:"#A78BFA",borderRadius:99,padding:"1px 7px",fontSize:10,marginLeft:6,fontFamily:"sans-serif"}}>매니저</span>}
+                <p style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",margin:"1px 0 0"}}>PIN: {emp.pin}</p>
+              </div>
+              <button onClick={e=>{e.stopPropagation();del(emp.id);}} style={{...S.btnG,color:"#EF4444",fontSize:11,padding:"2px 8px"}}>삭제</button>
+              <span style={{color:"#64748B"}}>{exp===emp.id?"▲":"▼"}</span>
+            </div>
+            {exp===emp.id && (
+              <div style={{borderTop:"1px solid "+emp.color+"33",padding:14}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
+                  <div><label style={S.lbl}>이름</label><input value={emp.name} onChange={e=>upE(emp.id,{name:e.target.value})} style={S.inp}/></div>
+                  <div><label style={S.lbl}>PIN</label><input value={emp.pin} onChange={e=>upE(emp.id,{pin:e.target.value})} style={S.inp}/></div>
+                  <div><label style={S.lbl}>직급</label>
+                    <select value={emp.role||"staff"} onChange={e=>upE(emp.id,{role:e.target.value})} style={S.inp}>
+                      <option value="staff">일반</option><option value="manager">매니저</option>
+                    </select>
+                  </div>
+                </div>
+                <label style={S.lbl}>스킬 수준</label>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginTop:6}}>
+                  {skills.map(sk => {
+                    const lv = O(emp.skills)[sk.id]||0;
+                    return (
+                      <div key={sk.id} style={{background:"#0F172A",borderRadius:8,padding:"8px 10px",border:"1px solid #334155"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                          <span style={{color:"#CBD5E1",fontSize:11,fontFamily:"sans-serif"}}>{sk.name}</span>
+                          <span style={{color:EXP_C[lv],fontSize:10,fontWeight:700,fontFamily:"sans-serif"}}>{EXP[lv]}</span>
+                        </div>
+                        <input type="range" min={0} max={4} value={lv} onChange={e=>upE(emp.id,{skills:{...O(emp.skills),[sk.id]:Number(e.target.value)}})} style={{width:"100%",accentColor:EXP_C[lv]}}/>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Training Tab ──────────────────────────────────────────────────────────────
+function TrainTab({data, upd}) {
+  const [selEmp, setSelEmp] = useState(null); // 선택된 직원 id
+  const [view, setView] = useState("people"); // "people" | "items"
+  const [newName, setNewName] = useState(""); const [newCat, setNewCat] = useState("");
+  const emps = A(data.employees); const items = A(data.trainItems); const prog = O(data.trainProgress);
+  const cats = [...new Set(items.map(t => t.cat))];
+
+  function getProg(eid, iid) { return prog[eid+"_"+iid] || "pending"; }
+  function cycle(eid, iid) {
+    const c = getProg(eid, iid);
+    upd("trainProgress", {...prog, [eid+"_"+iid]: {pending:"progress",progress:"done",done:"pending"}[c]});
+  }
+  function addItem() {
+    if (!newName.trim()) return;
+    upd("trainItems", [...items, {id:"t"+uid(), cat:newCat||"기본", name:newName.trim()}]);
+    setNewName(""); setNewCat("");
+  }
+  function delItem(id) { upd("trainItems", items.filter(t => t.id!==id)); }
+
+  const ST = {done:{label:"완료",bg:"#10B981",icon:"✓"}, progress:{label:"진행중",bg:"#F59E0B",icon:"●"}, pending:{label:"미진행",bg:"#334155",icon:""}};
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>인수인계 현황</h2>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>{setView("people");setSelEmp(null);}} style={{...S.btnG,...(view==="people"?{color:"#38BDF8",borderColor:"rgba(29,78,216,.3)"}:{})}}>👥 직원별</button>
+          <button onClick={()=>setView("items")} style={{...S.btnG,...(view==="items"?{color:"#38BDF8",borderColor:"rgba(29,78,216,.3)"}:{})}}>⚙️ 항목 관리</button>
+        </div>
+      </div>
+
+      {/* ── 직원별 뷰 ── */}
+      {view==="people" && !selEmp && (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:8}}>
+          {emps.map(emp => {
+            const done = items.filter(t => getProg(emp.id,t.id)==="done").length;
+            const pct = items.length > 0 ? Math.round(done/items.length*100) : 0;
+            return (
+              <button key={emp.id} onClick={()=>setSelEmp(emp.id)}
+                style={{...S.card,cursor:"pointer",textAlign:"left",padding:"14px 16px",border:"1px solid "+emp.color+"44",background:"#1E293B"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                  <div style={{width:32,height:32,borderRadius:8,background:emp.color+"22",display:"flex",alignItems:"center",justifyContent:"center",color:emp.color,fontWeight:800,fontSize:14,fontFamily:"sans-serif",flexShrink:0}}>{emp.name[0]}</div>
+                  <span style={{color:emp.color,fontWeight:700,fontFamily:"sans-serif",fontSize:13}}>{emp.name}</span>
+                </div>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}}>
+                  <span style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif"}}>{done}/{items.length} 완료</span>
+                  <span style={{color:pct===100?"#10B981":pct>=50?"#F59E0B":"#94A3B8",fontWeight:700,fontFamily:"sans-serif",fontSize:12}}>{pct}%</span>
+                </div>
+                <div style={{background:"#0F172A",borderRadius:99,height:5,overflow:"hidden"}}>
+                  <div style={{width:pct+"%",height:5,background:pct===100?"#10B981":pct>=50?"#F59E0B":"#64748B",transition:"width .3s"}}/>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── 직원 상세 뷰 ── */}
+      {view==="people" && selEmp && (()=>{
+        const emp = emps.find(e=>e.id===selEmp);
+        if(!emp) return null;
+        const done = items.filter(t=>getProg(emp.id,t.id)==="done").length;
+        const pct = items.length>0 ? Math.round(done/items.length*100) : 0;
+        return (
+          <div>
+            <button onClick={()=>setSelEmp(null)} style={{...S.btnG,marginBottom:14,fontSize:12}}>← 목록으로</button>
+            <div style={{...S.card,marginBottom:14,display:"flex",alignItems:"center",gap:12}}>
+              <div style={{width:40,height:40,borderRadius:10,background:emp.color+"22",display:"flex",alignItems:"center",justifyContent:"center",color:emp.color,fontWeight:800,fontSize:18,fontFamily:"sans-serif",flexShrink:0}}>{emp.name[0]}</div>
+              <div style={{flex:1}}>
+                <span style={{color:emp.color,fontWeight:700,fontFamily:"sans-serif",fontSize:15}}>{emp.name}</span>
+                <div style={{background:"#0F172A",borderRadius:99,height:5,overflow:"hidden",marginTop:6}}>
+                  <div style={{width:pct+"%",height:5,background:pct===100?"#10B981":pct>=50?"#F59E0B":"#64748B"}}/>
+                </div>
+              </div>
+              <span style={{color:pct===100?"#10B981":"#F59E0B",fontWeight:800,fontFamily:"sans-serif",fontSize:18,flexShrink:0}}>{pct}%</span>
+            </div>
+            <p style={{color:"#475569",fontSize:11,fontFamily:"sans-serif",margin:"0 0 10px"}}>클릭으로 상태 변경 (미진행 → 진행중 → 완료)</p>
+            {cats.map(cat=>(
+              <div key={cat} style={{marginBottom:12}}>
+                <p style={{color:"#94A3B8",fontSize:11,fontFamily:"sans-serif",fontWeight:700,margin:"0 0 6px",textTransform:"uppercase"}}>📁 {cat}</p>
+                {items.filter(t=>t.cat===cat).map(item=>{
+                  const p = getProg(emp.id, item.id);
+                  const st = ST[p]||ST.pending;
+                  return (
+                    <button key={item.id} onClick={()=>cycle(emp.id,item.id)}
+                      style={{width:"100%",display:"flex",alignItems:"center",gap:10,background:"#1E293B",border:"1px solid #334155",borderRadius:8,padding:"10px 14px",marginBottom:4,cursor:"pointer",textAlign:"left"}}>
+                      <div style={{width:24,height:24,borderRadius:6,background:st.bg,display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",fontSize:13,fontWeight:700,flexShrink:0}}>{st.icon}</div>
+                      <span style={{color:"#CBD5E1",fontFamily:"sans-serif",fontSize:13,flex:1}}>{item.name}</span>
+                      <span style={{color:st.bg,fontSize:11,fontFamily:"sans-serif",fontWeight:600,flexShrink:0}}>{st.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {items.length===0 && <p style={{color:"#475569",fontFamily:"sans-serif",fontSize:13,textAlign:"center",padding:"20px 0"}}>항목을 먼저 추가해주세요</p>}
+          </div>
+        );
+      })()}
+
+      {/* ── 항목 관리 뷰 ── */}
+      {view==="items" && (
+        <div>
+          {cats.map(cat=>(
+            <div key={cat} style={{marginBottom:14}}>
+              <p style={{color:"#94A3B8",fontSize:11,fontFamily:"sans-serif",fontWeight:700,margin:"0 0 6px",textTransform:"uppercase"}}>📁 {cat}</p>
+              {items.filter(t=>t.cat===cat).map(item=>(
+                <div key={item.id} style={{...S.card,display:"flex",alignItems:"center",gap:8,padding:"10px 14px",marginBottom:4}}>
+                  <span style={{color:"#CBD5E1",fontFamily:"sans-serif",fontSize:13,flex:1}}>{item.name}</span>
+                  <button onClick={()=>delItem(item.id)} style={{background:"none",border:"none",color:"#EF4444",cursor:"pointer",fontSize:16,padding:0}}>✕</button>
+                </div>
+              ))}
+            </div>
+          ))}
+          <div style={{...S.card,display:"flex",gap:8,alignItems:"center"}}>
+            <input placeholder="카테고리" value={newCat} onChange={e=>setNewCat(e.target.value)} style={{...S.inp,width:90}}/>
+            <input placeholder="항목 이름" value={newName} onChange={e=>setNewName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addItem()} style={{...S.inp,flex:1}}/>
+            <button onClick={addItem} style={S.btnA}>추가</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Notices Tab ───────────────────────────────────────────────────────────────
+function NoticeTab({data, upd}) {
+  const [form, setForm] = useState(null);
+  const [title, setTitle] = useState(""); const [content, setContent] = useState(""); const [pinned, setPinned] = useState(false);
+  const [attachments, setAttachments] = useState([]); // [{name,type,data}]
+  const [readExpand, setReadExpand] = useState(null); // notice id
+  const notices = A(data.notices); const readBy = O(data.readBy); const emps = A(data.employees);
+
+  function openNew() { setTitle(""); setContent(""); setPinned(false); setAttachments([]); setForm("new"); }
+  function openEdit(n) { setTitle(n.title); setContent(n.content); setPinned(!!n.pinned); setAttachments(A(n.attachments)); setForm(n); }
+  function handleFile(e) {
+    const files = Array.from(e.target.files||[]);
+    files.forEach(file => {
+      if (file.size > 5*1024*1024) { alert(file.name+": 파일이 5MB를 초과합니다"); return; }
+      const reader = new FileReader();
+      reader.onload = ev => setAttachments(prev => [...prev, {name:file.name, type:file.type, data:ev.target.result}]);
+      reader.readAsDataURL(file);
+    });
+    e.target.value = "";
+  }
+  function save() {
+    if (!title.trim()) return;
+    if (form==="new") upd("notices", [{id:Date.now(), createdAt:new Date().toISOString(), title, content, pinned, attachments}, ...notices]);
+    else upd("notices", notices.map(n => n.id===form.id ? {...n,title,content,pinned,attachments} : n));
+    setForm(null);
+  }
+  function del(id) { upd("notices", notices.filter(n=>n.id!==id)); }
+  const sorted = [...notices].sort((a,b) => (b.pinned?1:0)-(a.pinned?1:0) || new Date(b.createdAt)-new Date(a.createdAt));
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+        <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>📢 공지사항</h2>
+        <button onClick={form?()=>setForm(null):openNew} style={S.btnA}>{form?"취소":"+ 작성"}</button>
+      </div>
+      {form && (
+        <div style={{...S.card,marginBottom:14}}>
+          <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="제목" style={{...S.inp,marginBottom:8}}/>
+          <textarea value={content} onChange={e=>setContent(e.target.value)} rows={4} placeholder="내용" style={{background:"#0F172A",border:"1px solid #334155",borderRadius:8,padding:"8px 12px",color:"#E2E8F0",fontSize:13,fontFamily:"sans-serif",outline:"none",width:"100%",boxSizing:"border-box",resize:"vertical",marginBottom:10}}/>
+          {/* 파일 첨부 */}
+          <div style={{marginBottom:10}}>
+            <label style={{...S.lbl,display:"inline-block",marginBottom:6}}>📎 파일 첨부 (이미지·PDF, 최대 5MB)</label>
+            <input type="file" accept="image/*,.pdf" multiple onChange={handleFile}
+              style={{display:"block",color:"#94A3B8",fontFamily:"sans-serif",fontSize:12,marginBottom:6}}/>
+            {attachments.map((f,i) => (
+              <div key={i} style={{display:"flex",alignItems:"center",gap:6,background:"#0F172A",borderRadius:6,padding:"5px 10px",marginBottom:3}}>
+                <span style={{fontSize:14}}>{f.type.startsWith("image")?"🖼":"📄"}</span>
+                <span style={{color:"#CBD5E1",fontSize:12,fontFamily:"sans-serif",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</span>
+                <button onClick={()=>setAttachments(attachments.filter((_,j)=>j!==i))} style={{background:"none",border:"none",color:"#EF4444",cursor:"pointer",fontSize:14,padding:0}}>✕</button>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <input type="checkbox" id="npin" checked={pinned} onChange={e=>setPinned(e.target.checked)}/>
+            <label htmlFor="npin" style={{color:"#CBD5E1",fontFamily:"sans-serif",fontSize:13,cursor:"pointer"}}>📌 상단 고정</label>
+          </div>
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <button onClick={()=>setForm(null)} style={S.btnG}>취소</button>
+            <button onClick={save} style={S.btnA}>{form==="new"?"등록":"수정 완료"}</button>
+          </div>
+        </div>
+      )}
+      {sorted.map(n => {
+        const rl = A(readBy[n.id]);
+        const readEmps   = emps.filter(e => rl.includes(e.id));
+        const unreadEmps = emps.filter(e => e.role!=="manager" && !rl.includes(e.id));
+        const isExpanded = readExpand===n.id;
+        return (
+          <div key={n.id} style={{...S.card,border:"1px solid "+(n.pinned?"rgba(245,158,11,.3)":"#334155")}}>
+            <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:6}}>
+              {n.pinned && <span style={{flexShrink:0}}>📌</span>}
+              <span style={{color:"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:14,flex:1}}>{n.title}</span>
+              <button onClick={()=>setReadExpand(isExpanded?null:n.id)} style={{...S.btnG,fontSize:10,padding:"2px 7px",color:"#10B981",flexShrink:0}}>
+                읽음 {readEmps.length}/{emps.filter(e=>e.role!=="manager").length}
+              </button>
+              <button onClick={()=>openEdit(n)} style={{...S.btnG,fontSize:11,padding:"2px 8px",flexShrink:0}}>수정</button>
+              <button onClick={()=>del(n.id)} style={{...S.btnG,fontSize:11,padding:"2px 8px",color:"#EF4444",flexShrink:0}}>삭제</button>
+            </div>
+            <p style={{color:"#475569",fontSize:11,fontFamily:"sans-serif",margin:"0 0 6px"}}>{new Date(n.createdAt).toLocaleDateString("ko-KR")}</p>
+            {n.content && <p style={{color:"#CBD5E1",fontFamily:"sans-serif",fontSize:13,margin:"0 0 8px",whiteSpace:"pre-wrap",lineHeight:1.6}}>{n.content}</p>}
+            {/* 첨부파일 */}
+            {A(n.attachments).map((f,i) => (
+              <div key={i} style={{marginBottom:8}}>
+                {f.type.startsWith("image") ? (
+                  <img src={f.data} alt={f.name} style={{maxWidth:"100%",maxHeight:300,borderRadius:8,display:"block"}}/>
+                ) : (
+                  <a href={f.data} download={f.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:"#0F172A",borderRadius:8,padding:"8px 12px",color:"#38BDF8",fontSize:12,fontFamily:"sans-serif",textDecoration:"none"}}>
+                    📄 {f.name} 다운로드
+                  </a>
+                )}
+              </div>
+            ))}
+            {/* 읽음 확인 펼치기 */}
+            {isExpanded && (
+              <div style={{background:"#0F172A",borderRadius:8,padding:12,marginTop:8}}>
+                <p style={{color:"#10B981",fontSize:11,fontFamily:"sans-serif",fontWeight:700,margin:"0 0 6px"}}>✅ 읽음 ({readEmps.length}명)</p>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4,marginBottom:8}}>
+                  {readEmps.map(e=><span key={e.id} style={{background:e.color+"22",color:e.color,borderRadius:99,padding:"2px 8px",fontSize:11,fontFamily:"sans-serif",fontWeight:600}}>{e.name}</span>)}
+                  {readEmps.length===0 && <span style={{color:"#475569",fontSize:11,fontFamily:"sans-serif"}}>없음</span>}
+                </div>
+                {unreadEmps.length>0 && <>
+                  <p style={{color:"#F59E0B",fontSize:11,fontFamily:"sans-serif",fontWeight:700,margin:"0 0 6px"}}>⏳ 미확인 ({unreadEmps.length}명)</p>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {unreadEmps.map(e=><span key={e.id} style={{background:"#1E293B",color:"#64748B",borderRadius:99,padding:"2px 8px",fontSize:11,fontFamily:"sans-serif"}}>{e.name}</span>)}
+                  </div>
+                </>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Requests Tab ──────────────────────────────────────────────────────────────
+function ReqTab({data, upd}) {
+  const [view, setView] = useState("overview");
+  const [filter, setFilter] = useState("pending");
+  const [quickModal, setQuickModal] = useState(null);
+
+  const reqs  = A(data.reqs);
+  const emps  = A(data.employees);
+  const week  = A(data.week);
+  const sched = O(data.sched);
+  const pc    = reqs.filter(r => r.status==="pending").length;
+
+  // 승인·대기 요청 전체 삭제
+  function clearDone() {
+    if (!window.confirm("승인/반려된 요청을 모두 삭제할까요?")) return;
+    upd("reqs", reqs.filter(r => r.status==="pending"));
+  }
+
+  // 해당 직원·날짜의 모든 휴무 상태 (종일 + 시간) 반환
+  function getOffStates(emp, date) {
+    const dayReqs = reqs.filter(r => r.empId===emp.id && r.date===date && r.status!=="rejected");
+    const states = dayReqs.map(r => ({
+      type: r.status==="approved" ? "req_approved" : "req_pending",
+      allDay: r.allDay,
+      req: r,
+    }));
+    const cell = getCell(sched, emp.id, date);
+    if (cell.off) states.push({type:"sched_off", allDay:true, req:null});
+    return states;
+  }
+
+  // 현황표 셀 색상·라벨 계산 (여러 상태 중 우선순위: 승인 > 대기 > sched_off)
+  function cellStyle(states) {
+    if (!states.length) return {bg:"", label:"", sub:"", color:"#334155"};
+    const approved  = states.find(s => s.type==="req_approved");
+    const pending   = states.find(s => s.type==="req_pending");
+    const schedOff  = states.find(s => s.type==="sched_off");
+    if (approved) {
+      const lbl = approved.allDay ? "종일" : approved.req.start+"~"+approved.req.end;
+      return {bg:"rgba(16,185,129,.22)", label:"승인", sub:lbl, color:"#10B981"};
+    }
+    if (pending) {
+      const lbl = pending.allDay ? "종일" : pending.req.start+"~"+pending.req.end;
+      return {bg:"rgba(245,158,11,.22)", label:"대기", sub:lbl, color:"#F59E0B"};
+    }
+    if (schedOff) return {bg:"rgba(100,116,139,.2)", label:"휴무", sub:"", color:"#94A3B8"};
+    return {bg:"", label:"", sub:"", color:"#334155"};
+  }
+
+  const shown = reqs
+    .filter(r => filter==="all" || r.status===filter)
+    .sort((a,b) => new Date(b.createdAt)-new Date(a.createdAt));
+  const doneCount = reqs.filter(r => r.status!=="pending").length;
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>휴무 관리</h2>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setView("overview")} style={{...S.btnG,...(view==="overview"?{color:"#F59E0B",borderColor:"#F59E0B55"}:{})}}>📊 현황표</button>
+          <button onClick={()=>setView("requests")} style={{...S.btnG,...(view==="requests"?{color:"#38BDF8",borderColor:"rgba(29,78,216,.3)"}:{})}}>
+            📬 요청{pc>0&&<span style={{marginLeft:4,background:"#EF4444",color:"#fff",borderRadius:99,padding:"0 5px",fontSize:10}}>{pc}</span>}
+          </button>
+        </div>
+      </div>
+
+      {/* ── 현황표 ── */}
+      {view==="overview" && (
+        <div>
+          <p style={{color:"#475569",fontSize:11,fontFamily:"sans-serif",margin:"0 0 10px"}}>
+            셀 클릭 → 수정 &nbsp;·&nbsp;
+            <span style={{color:"#10B981"}}>■</span> 승인 &nbsp;
+            <span style={{color:"#F59E0B"}}>■</span> 대기 &nbsp;
+            <span style={{color:"#94A3B8"}}>■</span> 직접 설정
+          </p>
+          <div style={{overflowX:"auto"}}>
+            <table style={{borderCollapse:"separate",borderSpacing:3,minWidth:"max-content"}}>
+              <thead>
+                <tr>
+                  <th style={{background:"#1E293B",border:"1px solid #334155",borderRadius:6,padding:"8px 14px",color:"#94A3B8",fontFamily:"sans-serif",fontSize:11,textAlign:"left",minWidth:90,position:"sticky",left:0,zIndex:2}}>직원</th>
+                  {week.map(day => {
+                    const wk = ["토","일"].includes(day.label);
+                    return (
+                      <th key={day.id} style={{background:wk?"#2D1A0A":"#1E293B",border:"1px solid #334155",borderRadius:6,padding:"6px 10px",color:wk?"#F87171":"#94A3B8",fontFamily:"sans-serif",fontSize:11,textAlign:"center",minWidth:62}}>
+                        <div style={{fontWeight:700}}>{day.label}</div>
+                        <div style={{fontSize:10,color:"#475569",marginTop:1}}>{day.date.slice(5)}</div>
+                      </th>
+                    );
+                  })}
+                  <th style={{background:"#1E293B",border:"1px solid #334155",borderRadius:6,padding:"6px 8px",color:"#94A3B8",fontFamily:"sans-serif",fontSize:11,textAlign:"center",minWidth:46}}>합계</th>
+                </tr>
+              </thead>
+              <tbody>
+                {emps.map(emp => {
+                  const totalOff = week.filter(day => getOffStates(emp, day.date).length > 0).length;
+                  return (
+                    <tr key={emp.id}>
+                      <td style={{background:"#1E293B",border:"1px solid #334155",borderRadius:6,padding:"7px 14px",position:"sticky",left:0,zIndex:1}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          <div style={{width:7,height:7,borderRadius:99,background:emp.color,flexShrink:0}}/>
+                          <span style={{color:emp.color,fontWeight:700,fontFamily:"sans-serif",fontSize:12,whiteSpace:"nowrap"}}>{emp.name}</span>
+                        </div>
+                      </td>
+                      {week.map(day => {
+                        const states = getOffStates(emp, day.date);
+                        const wk = ["토","일"].includes(day.label);
+                        const cs = cellStyle(states);
+                        const bg = cs.bg || (wk ? "rgba(239,68,68,.04)" : "#0F172A");
+                        return (
+                          <td key={day.id} style={{padding:2,textAlign:"center"}}>
+                            <button onClick={()=>setQuickModal({emp, day})}
+                              style={{width:"100%",minWidth:58,minHeight:42,borderRadius:7,background:bg,border:"1.5px solid "+(states.length?"transparent":"#1E293B"),cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:1,padding:"4px 2px"}}>
+                              {cs.label && <span style={{fontSize:10,color:cs.color,fontWeight:700,fontFamily:"sans-serif",lineHeight:1}}>{cs.label}</span>}
+                              {cs.sub   && <span style={{fontSize:9,color:cs.color+"CC",fontFamily:"sans-serif",lineHeight:1,whiteSpace:"nowrap"}}>{cs.sub}</span>}
+                            </button>
+                          </td>
+                        );
+                      })}
+                      <td style={{textAlign:"center",padding:"0 4px"}}>
+                        <span style={{color:totalOff>0?"#F87171":"#334155",fontWeight:700,fontFamily:"sans-serif",fontSize:12}}>
+                          {totalOff>0?totalOff+"일":"-"}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── 요청 목록 ── */}
+      {view==="requests" && (
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12,flexWrap:"wrap"}}>
+            {["pending","approved","rejected","all"].map(f => (
+              <button key={f} onClick={()=>setFilter(f)} style={{...S.btnG,...(filter===f?{color:"#38BDF8",borderColor:"rgba(29,78,216,.3)"}:{})}}>
+                {{pending:"대기",approved:"승인",rejected:"반려",all:"전체"}[f]}
+                {f==="pending"&&pc>0&&<span style={{marginLeft:4,background:"#EF4444",color:"#fff",borderRadius:99,padding:"0 5px",fontSize:10}}>{pc}</span>}
+              </button>
+            ))}
+            {doneCount>0 && (
+              <button onClick={clearDone} style={{...S.btnG,color:"#EF4444",borderColor:"#EF444433",marginLeft:"auto"}}>
+                🗑 처리완료 전체삭제 ({doneCount})
+              </button>
+            )}
+          </div>
+          {shown.length===0 && <p style={{color:"#475569",fontFamily:"sans-serif",textAlign:"center",padding:"40px 0"}}>요청 없음</p>}
+          {shown.map(req => {
+            const emp = emps.find(e=>e.id===req.empId);
+            const ss  = RQS[req.status]||RQS.pending;
+            return (
+              <div key={req.id} style={S.card}>
+                <div style={{display:"flex",alignItems:"center",marginBottom:8}}>
+                  <span style={{color:emp?emp.color:"#94A3B8",fontWeight:700,fontSize:14,fontFamily:"sans-serif",flex:1}}>{emp?.name||"?"}</span>
+                  <span style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif"}}>{new Date(req.createdAt).toLocaleDateString("ko-KR")}</span>
+                  <span style={{background:ss.bg,color:ss.tx,borderRadius:99,padding:"2px 10px",fontSize:11,fontWeight:700,fontFamily:"sans-serif",marginLeft:8}}>{ss.lb}</span>
+                  {/* 삭제 버튼 – 처리 완료된 것만 */}
+                  {req.status!=="pending" && (
+                    <button onClick={()=>upd("reqs", reqs.filter(r=>r.id!==req.id))}
+                      style={{background:"none",border:"none",color:"#475569",cursor:"pointer",fontSize:16,padding:"0 0 0 8px",lineHeight:1}}
+                      title="삭제">✕</button>
+                  )}
+                </div>
+                <div style={{background:"#0F172A",borderRadius:8,padding:"10px 12px",marginBottom:req.status==="pending"?10:0}}>
+                  <p style={{color:"#CBD5E1",fontSize:13,fontFamily:"sans-serif",margin:"0 0 3px"}}>📅 {req.date} {req.allDay?"(종일)":req.start+"~"+req.end}</p>
+                  {req.reason&&<p style={{color:"#94A3B8",fontSize:12,fontFamily:"sans-serif",margin:0}}>💬 {req.reason}</p>}
+                </div>
+                {req.status==="pending" && (
+                  <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:2}}>
+                    <button onClick={()=>upd("reqs",reqs.map(r=>r.id===req.id?{...r,status:"rejected"}:r))} style={{...S.btnG,background:"#FEE2E2",color:"#991B1B",borderColor:"#FECACA"}}>반려</button>
+                    <button onClick={()=>upd("reqs",reqs.map(r=>r.id===req.id?{...r,status:"approved"}:r))} style={{...S.btnG,background:"#D1FAE5",color:"#065F46",borderColor:"#A7F3D0"}}>승인</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── 빠른 수정 모달 ── */}
+      {quickModal && (
+        <QuickOffModal
+          emp={quickModal.emp}
+          day={quickModal.day}
+          reqs={reqs}
+          sched={sched}
+          onClose={()=>setQuickModal(null)}
+          onUpdateReq={(id,status)=>upd("reqs",reqs.map(r=>r.id===id?{...r,status}:r))}
+          onDeleteReq={(id)=>upd("reqs",reqs.filter(r=>r.id!==id))}
+          onAddReq={(req)=>upd("reqs",[...reqs,req])}
+          onSetSchedOff={(off)=>{
+            const key = quickModal.emp.id+"__"+quickModal.day.date;
+            upd("sched",{...sched,[key]:off?{start:"",end:"",brk:0,off:true}:{start:"",end:"",brk:0,off:false}});
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function QuickOffModal({emp, day, reqs, sched, onClose, onUpdateReq, onDeleteReq, onAddReq, onSetSchedOff}) {
+  const [reason, setReason] = useState("");
+  const [startT, setStartT] = useState("09:00");
+  const [endT,   setEndT]   = useState("18:00");
+  const [mode, setMode] = useState("allday"); // "allday" | "partial"
+
+  const anyReqs = reqs.filter(r => r.empId===emp.id && r.date===day.date && r.status!=="rejected");
+  const cell = getCell(sched, emp.id, day.date);
+  const isSchedOff = cell.off;
+  const hasOff = anyReqs.length > 0 || isSchedOff;
+
+  function addOff() {
+    const allDay = mode==="allday";
+    // 스케줄에 바로 off 표시
+    const key = emp.id+"__"+day.date;
+    if (allDay) {
+      onSetSchedOff(true);
+    } else {
+      // 부분 휴무는 req로 기록 (스케줄엔 별도로 표시 안함, 요청 목록에서 확인)
+      onAddReq({id:Date.now(), empId:emp.id, date:day.date, allDay:false, start:startT, end:endT, reason:reason||"관리자 직접 등록", status:"approved", createdAt:new Date().toISOString()});
+    }
+    onClose();
+  }
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.65)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300,padding:16}}>
+      <div style={{background:"#1E293B",borderRadius:16,padding:22,width:"100%",maxWidth:320,border:"1px solid #334155"}}>
+        <div style={{display:"flex",alignItems:"center",marginBottom:16}}>
+          <div style={{flex:1}}>
+            <span style={{color:emp.color,fontWeight:800,fontFamily:"sans-serif",fontSize:15}}>{emp.name}</span>
+            <span style={{color:"#64748B",fontFamily:"sans-serif",fontSize:13,marginLeft:8}}>{day.label} {day.date.slice(5)}</span>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",color:"#64748B",fontSize:20,cursor:"pointer",padding:0}}>✕</button>
+        </div>
+
+        {/* 기존 휴무 목록 */}
+        {anyReqs.map(req => (
+          <div key={req.id} style={{background:"rgba(16,185,129,.08)",border:"1px solid rgba(16,185,129,.25)",borderRadius:10,padding:"10px 12px",marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+            <div style={{flex:1}}>
+              <span style={{color:"#10B981",fontWeight:700,fontSize:12,fontFamily:"sans-serif"}}>{req.allDay?"종일":req.start+"~"+req.end}</span>
+              {req.reason && <span style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",marginLeft:6}}>{req.reason}</span>}
+            </div>
+            <button onClick={()=>{onDeleteReq(req.id);}} style={{background:"none",border:"none",color:"#EF4444",cursor:"pointer",fontSize:16,padding:0}}>✕</button>
+          </div>
+        ))}
+        {isSchedOff && (
+          <div style={{background:"rgba(100,116,139,.15)",border:"1px solid #334155",borderRadius:10,padding:"10px 12px",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <span style={{color:"#94A3B8",fontWeight:700,fontSize:12,fontFamily:"sans-serif"}}>스케줄 휴무</span>
+            <button onClick={()=>{onSetSchedOff(false);onClose();}} style={{background:"none",border:"none",color:"#EF4444",cursor:"pointer",fontSize:16,padding:0}}>✕</button>
+          </div>
+        )}
+
+        {/* 휴무 추가 */}
+        <div style={{borderTop:hasOff?"1px solid #334155":"none",paddingTop:hasOff?14:0}}>
+          {hasOff && <p style={{color:"#94A3B8",fontSize:11,fontFamily:"sans-serif",fontWeight:600,margin:"0 0 10px",textTransform:"uppercase"}}>휴무 추가</p>}
+          <div style={{display:"flex",gap:6,marginBottom:10}}>
+            <button onClick={()=>setMode("allday")} style={{flex:1,padding:"8px",borderRadius:8,border:"2px solid "+(mode==="allday"?"#F87171":"#334155"),background:mode==="allday"?"rgba(239,68,68,.12)":"#0F172A",color:mode==="allday"?"#F87171":"#64748B",fontFamily:"sans-serif",fontSize:12,fontWeight:700,cursor:"pointer"}}>종일</button>
+            <button onClick={()=>setMode("partial")} style={{flex:1,padding:"8px",borderRadius:8,border:"2px solid "+(mode==="partial"?"#38BDF8":"#334155"),background:mode==="partial"?"rgba(56,189,248,.12)":"#0F172A",color:mode==="partial"?"#38BDF8":"#64748B",fontFamily:"sans-serif",fontSize:12,fontWeight:700,cursor:"pointer"}}>시간 지정</button>
+          </div>
+          {mode==="partial" && (
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+              <div><label style={{display:"block",color:"#94A3B8",fontSize:10,fontFamily:"sans-serif",fontWeight:600,marginBottom:3}}>시작</label><input type="time" value={startT} onChange={e=>setStartT(e.target.value)} style={S.inp}/></div>
+              <div><label style={{display:"block",color:"#94A3B8",fontSize:10,fontFamily:"sans-serif",fontWeight:600,marginBottom:3}}>종료</label><input type="time" value={endT}   onChange={e=>setEndT(e.target.value)}   style={S.inp}/></div>
+            </div>
+          )}
+          <input value={reason} onChange={e=>setReason(e.target.value)} placeholder="사유 (선택)" style={{...S.inp,marginBottom:10}}/>
+          <button onClick={addOff} style={{...S.btnA,width:"100%"}}>
+            {mode==="allday"?"🗓 종일 휴무 지정":"⏱ 시간 휴무 추가"}
+          </button>
+        </div>
+        <button onClick={onClose} style={{...S.btnG,width:"100%",marginTop:8,fontSize:12}}>닫기</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Hour Management Tab ───────────────────────────────────────────────────────
+function HourTab({data, upd, mgr}) {
+  const STANDARD = 39; // 주당 기준 시간
+  const ledger   = O(data.hourLedger);   // { [weekId]: {actual, adj, note} }
+  const week     = A(data.week);
+  const sched    = O(data.sched);
+  const weekId   = week[0]?.date || "";
+
+  // 이번 주 실제 근무시간 계산 (스케줄 기반)
+  const thisWeekActual = week.reduce((s,d) => s + calcH(getCell(sched, mgr.id, d.date)), 0);
+
+  // 편집 상태
+  const [editId,   setEditId]   = useState(null);
+  const [editAct,  setEditAct]  = useState("");
+  const [editAdj,  setEditAdj]  = useState("");
+  const [editNote, setEditNote] = useState("");
+
+  function openEdit(wid, row) {
+    setEditId(wid);
+    setEditAct(String(row?.actual ?? ""));
+    setEditAdj(String(row?.adj    ?? 0));
+    setEditNote(row?.note ?? "");
+  }
+  function saveEdit() {
+    const actual = parseFloat(editAct) || 0;
+    const adj    = parseFloat(editAdj) || 0;
+    upd("hourLedger", {...ledger, [editId]: {actual, adj, note:editNote}});
+    setEditId(null);
+  }
+
+  // 이번 주를 장부에 반영 (스케줄 → actual 자동 입력)
+  function recordThisWeek() {
+    const existing = ledger[weekId] || {};
+    upd("hourLedger", {...ledger, [weekId]: {
+      actual: thisWeekActual,
+      adj:    existing.adj    || 0,
+      note:   existing.note   || "",
+    }});
+  }
+
+  // 전체 누적 계산
+  const rows    = Object.entries(ledger).sort(([a],[b]) => a.localeCompare(b));
+  const cumulative = rows.reduce((s,[,r]) => s + (r.actual - STANDARD + (r.adj||0)), 0);
+  const thisRow = ledger[weekId];
+  const thisWeekDelta = thisRow ? (thisRow.actual - STANDARD + (thisRow.adj||0)) : null;
+
+  // 숫자 색상
+  const dc = n => n > 0 ? "#F87171" : n < 0 ? "#38BDF8" : "#94A3B8";
+  const fmt = n => (n > 0 ? "+" : "") + Math.round(n*10)/10 + "h";
+
+  return (
+    <div style={{maxWidth:620}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:18}}>
+        <div>
+          <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>⏱ 시간관리 — {mgr.name}</h2>
+          <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:"3px 0 0"}}>기준 {STANDARD}h/주 · 초과 <span style={{color:"#F87171"}}>빨강</span> · 부족 <span style={{color:"#38BDF8"}}>파랑</span></p>
+        </div>
+        {/* 누적 잔액 뱃지 */}
+        <div style={{background:"#1E293B",border:"1px solid "+(cumulative>0?"#F8717144":cumulative<0?"#38BDF844":"#334155"),borderRadius:12,padding:"10px 18px",textAlign:"center"}}>
+          <p style={{color:"#94A3B8",fontSize:10,fontFamily:"sans-serif",margin:"0 0 2px",textTransform:"uppercase",fontWeight:600}}>누적 잔액</p>
+          <p style={{color:dc(cumulative),fontWeight:800,fontFamily:"sans-serif",fontSize:24,margin:0}}>{fmt(cumulative)}</p>
+        </div>
+      </div>
+
+      {/* 이번 주 카드 */}
+      <div style={{...S.card,marginBottom:16,border:"1px solid #F59E0B44"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,marginBottom:12}}>
+          <div>
+            <p style={{color:"#F59E0B",fontWeight:700,fontFamily:"sans-serif",fontSize:13,margin:0}}>이번 주 ({weekId}~)</p>
+            <p style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",margin:"2px 0 0"}}>스케줄 기반 예상 근무: <span style={{color:"#E2E8F0",fontWeight:700}}>{thisWeekActual}h</span></p>
+          </div>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={recordThisWeek} style={{...S.btnA,fontSize:11,padding:"6px 12px"}}>
+              📥 스케줄에서 가져오기
+            </button>
+            {thisRow && <button onClick={()=>openEdit(weekId,thisRow)} style={{...S.btnG,fontSize:11}}>수정</button>}
+          </div>
+        </div>
+        {thisRow ? (
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+            {[
+              {lb:"실제 근무",val:thisRow.actual+"h",c:"#E2E8F0"},
+              {lb:"기준 대비",val:fmt(thisRow.actual-STANDARD+(thisRow.adj||0)),c:dc(thisRow.actual-STANDARD+(thisRow.adj||0))},
+              {lb:"수동 조정",val:(thisRow.adj||0)===0?"없음":(thisRow.adj>0?"+":"")+thisRow.adj+"h",c:"#94A3B8"},
+            ].map(x=>(
+              <div key={x.lb} style={{background:"#0F172A",borderRadius:8,padding:"8px 12px",textAlign:"center"}}>
+                <p style={{color:"#64748B",fontSize:10,fontFamily:"sans-serif",margin:"0 0 3px",fontWeight:600}}>{x.lb}</p>
+                <p style={{color:x.c,fontSize:16,fontWeight:800,fontFamily:"sans-serif",margin:0}}>{x.val}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p style={{color:"#475569",fontFamily:"sans-serif",fontSize:13,textAlign:"center",padding:"8px 0",margin:0}}>
+            아직 이번 주 기록이 없어요. 스케줄 확정 후 "스케줄에서 가져오기"를 눌러주세요.
+          </p>
+        )}
+        {thisRow?.note && <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:"10px 0 0"}}>📝 {thisRow.note}</p>}
+      </div>
+
+      {/* 편집 모달 */}
+      {editId && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:16}}>
+          <div style={{...S.card,width:"100%",maxWidth:320,margin:0}}>
+            <div style={{display:"flex",alignItems:"center",marginBottom:14}}>
+              <span style={{color:"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:14,flex:1}}>📝 수정 — {editId}</span>
+              <button onClick={()=>setEditId(null)} style={{background:"none",border:"none",color:"#64748B",fontSize:20,cursor:"pointer",padding:0}}>✕</button>
+            </div>
+            <label style={S.lbl}>실제 근무시간 (h)</label>
+            <input type="number" step="0.5" value={editAct} onChange={e=>setEditAct(e.target.value)} style={{...S.inp,marginBottom:10}}/>
+            <label style={S.lbl}>수동 조정 (h, 예: +2 또는 -1.5)</label>
+            <input type="number" step="0.5" value={editAdj} onChange={e=>setEditAdj(e.target.value)} style={{...S.inp,marginBottom:10}}/>
+            <label style={S.lbl}>메모</label>
+            <input placeholder="예: 연차 반차 사용" value={editNote} onChange={e=>setEditNote(e.target.value)} style={{...S.inp,marginBottom:14}}/>
+            <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+              <button onClick={()=>{
+                if(window.confirm("이 주 기록을 삭제할까요?"))upd("hourLedger",Object.fromEntries(Object.entries(ledger).filter(([k])=>k!==editId)));setEditId(null);
+              }} style={{...S.btnG,color:"#EF4444",fontSize:11}}>삭제</button>
+              <button onClick={saveEdit} style={S.btnA}>저장</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 주별 이력 */}
+      <h3 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,fontSize:14,margin:"0 0 10px"}}>주별 이력</h3>
+      {rows.length===0 && <p style={{color:"#475569",fontFamily:"sans-serif",fontSize:13,textAlign:"center",padding:"20px 0"}}>아직 기록이 없습니다</p>}
+      <div style={{overflowX:"auto"}}>
+        <table style={{borderCollapse:"separate",borderSpacing:"0 4px",width:"100%",minWidth:420}}>
+          <thead>
+            <tr>
+              {["주 시작일","실제","기준","조정","차이","누계",""].map(h=>(
+                <th key={h} style={{background:"#1E293B",border:"1px solid #334155",padding:"6px 10px",color:"#94A3B8",fontFamily:"sans-serif",fontSize:11,fontWeight:600,textAlign:"center",whiteSpace:"nowrap"}}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {(()=>{
+              let cum=0;
+              return rows.map(([wid,r])=>{
+                const delta = r.actual - STANDARD + (r.adj||0);
+                cum += delta;
+                const isThis = wid===weekId;
+                return (
+                  <tr key={wid} style={{background:isThis?"rgba(245,158,11,.06)":"transparent"}}>
+                    <td style={{background:"#1E293B",border:"1px solid #334155",borderRadius:"6px 0 0 6px",padding:"8px 12px",color:isThis?"#F59E0B":"#CBD5E1",fontFamily:"sans-serif",fontSize:12,fontWeight:isThis?700:400,whiteSpace:"nowrap"}}>{wid}</td>
+                    <td style={{background:"#1E293B",border:"1px solid #334155",padding:"8px 10px",color:"#E2E8F0",fontFamily:"sans-serif",fontSize:12,textAlign:"center"}}>{r.actual}h</td>
+                    <td style={{background:"#1E293B",border:"1px solid #334155",padding:"8px 10px",color:"#64748B",fontFamily:"sans-serif",fontSize:12,textAlign:"center"}}>{STANDARD}h</td>
+                    <td style={{background:"#1E293B",border:"1px solid #334155",padding:"8px 10px",color:"#94A3B8",fontFamily:"sans-serif",fontSize:12,textAlign:"center"}}>{(r.adj||0)===0?"-":(r.adj>0?"+":"")+r.adj+"h"}</td>
+                    <td style={{background:"#1E293B",border:"1px solid #334155",padding:"8px 10px",color:dc(delta),fontWeight:700,fontFamily:"sans-serif",fontSize:12,textAlign:"center"}}>{fmt(delta)}</td>
+                    <td style={{background:"#1E293B",border:"1px solid #334155",padding:"8px 10px",color:dc(cum),fontWeight:700,fontFamily:"sans-serif",fontSize:12,textAlign:"center"}}>{fmt(cum)}</td>
+                    <td style={{background:"#1E293B",border:"1px solid #334155",borderRadius:"0 6px 6px 0",padding:"4px 8px",textAlign:"center"}}>
+                      <button onClick={()=>openEdit(wid,r)} style={{...S.btnG,fontSize:10,padding:"3px 8px"}}>수정</button>
+                    </td>
+                  </tr>
+                );
+              });
+            })()}
+          </tbody>
+        </table>
+      </div>
+      {rows.length>0 && (
+        <button onClick={()=>{if(window.confirm("전체 이력을 초기화할까요?"))upd("hourLedger",{});}}
+          style={{...S.btnG,color:"#EF4444",fontSize:11,marginTop:12}}>🗑 전체 초기화</button>
+      )}
+    </div>
+  );
+}
+
+// ── Settings Tab ──────────────────────────────────────────────────────────────
+function SettTab({data, upd}) {
+  const cfg = O(data.cfg);
+  const [pin, setPin] = useState(cfg.pin||"1234");
+  const [rs, setRs] = useState(cfg.reqStart||"");
+  const [re, setRe] = useState(cfg.reqEnd||"");
+  const [ns, setNs] = useState(""); const [nc, setNc] = useState("");
+  const skills = A(data.skills);
+
+  return (
+    <div style={{maxWidth:500}}>
+      <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:"0 0 16px",fontSize:18}}>설정</h2>
+      <div style={{...S.card,marginBottom:12}}>
+        <p style={{color:"#CBD5E1",fontFamily:"sans-serif",fontWeight:700,margin:"0 0 10px",fontSize:14}}>🔐 관리자 PIN</p>
+        <input value={pin} onChange={e=>setPin(e.target.value)} style={{...S.inp,maxWidth:200}}/>
+      </div>
+      <div style={{...S.card,marginBottom:12}}>
+        <p style={{color:"#CBD5E1",fontFamily:"sans-serif",fontWeight:700,margin:"0 0 4px",fontSize:14}}>📬 휴무 신청 기간</p>
+        <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",marginBottom:10}}>비워두면 상시 신청 가능</p>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div><label style={S.lbl}>시작</label><input type="datetime-local" value={rs} onChange={e=>setRs(e.target.value)} style={S.inp}/></div>
+          <div><label style={S.lbl}>마감</label><input type="datetime-local" value={re} onChange={e=>setRe(e.target.value)} style={S.inp}/></div>
+        </div>
+      </div>
+      <div style={{...S.card,marginBottom:16}}>
+        <p style={{color:"#CBD5E1",fontFamily:"sans-serif",fontWeight:700,margin:"0 0 10px",fontSize:14}}>🎯 스킬 목록</p>
+        {skills.map(sk => (
+          <div key={sk.id} style={{background:"#0F172A",borderRadius:8,padding:"8px 12px",marginBottom:4,border:"1px solid #334155",display:"flex",alignItems:"center",gap:8}}>
+            <span style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",width:48}}>{sk.cat}</span>
+            <span style={{color:"#E2E8F0",fontSize:13,fontFamily:"sans-serif",flex:1,fontWeight:700}}>{sk.name}</span>
+            <button onClick={()=>upd("skills",skills.filter(x=>x.id!==sk.id))} style={{background:"none",border:"none",color:"#EF4444",cursor:"pointer",fontSize:15,padding:0}}>✕</button>
+          </div>
+        ))}
+        <div style={{display:"flex",gap:8,marginTop:10}}>
+          <input placeholder="카테고리" value={nc} onChange={e=>setNc(e.target.value)} style={{...S.inp,width:90}}/>
+          <input placeholder="스킬 이름" value={ns} onChange={e=>setNs(e.target.value)} style={{...S.inp,flex:1}}/>
+          <button onClick={()=>{if(!ns.trim())return;upd("skills",[...skills,{id:ns.trim().replace(/\s/g,"_")+"_"+uid(),cat:nc||"기타",name:ns.trim()}]);setNs("");setNc("");}} style={S.btnA}>추가</button>
+        </div>
+      </div>
+      <button onClick={()=>{upd("cfg",{pin,reqStart:rs,reqEnd:re});alert("저장됐습니다.");}} style={S.btnP}>💾 저장</button>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 직원 전용 뷰 (StaffApp에서 사용, 같은 storage를 공유함)
+// ═══════════════════════════════════════════════════════════════════
+
+function StaffSchedView({data, emp}) {
+  const week      = A(data.week);
+  const emps      = A(data.employees);
+  const confirmed = O(data.confirmedScheds);
+  const weekId    = week[0]?.date || "";
+  const snap      = confirmed[weekId] || null;
+  const myH       = snap ? week.reduce((s,d) => s+calcH(getCell(snap,emp.id,d.date)), 0) : 0;
+  const TH = {border:"1px solid #475569",padding:"4px 6px",textAlign:"center",fontFamily:"sans-serif",fontSize:10,fontWeight:700,color:"#94A3B8",whiteSpace:"nowrap",background:"#1E293B"};
+
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:14}}>
+        <div>
+          <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0,fontSize:18}}>확정 스케줄</h2>
+          <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:"2px 0 0"}}>{week[0]?.date||"미설정"} ~ {week[6]?.date||""}</p>
+        </div>
+        {snap
+          ? <span style={{background:"#D1FAE5",color:"#065F46",borderRadius:99,padding:"4px 14px",fontSize:12,fontWeight:700,fontFamily:"sans-serif"}}>✅ 확정됨</span>
+          : <span style={{background:"#FEF3C7",color:"#92400E",borderRadius:99,padding:"4px 14px",fontSize:12,fontWeight:700,fontFamily:"sans-serif"}}>⏳ 미확정</span>
+        }
+      </div>
+      {!snap && (
+        <div style={{background:"#1E293B",borderRadius:10,padding:28,border:"1px solid #334155",textAlign:"center"}}>
+          <p style={{color:"#64748B",fontFamily:"sans-serif",fontSize:13,margin:0}}>관리자가 아직 스케줄을 확정하지 않았습니다</p>
+        </div>
+      )}
+      {snap && myH>0 && (
+        <div style={{background:"#1E293B",borderRadius:10,padding:"12px 16px",border:"1px solid #F59E0B44",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <span style={{color:"#94A3B8",fontFamily:"sans-serif",fontSize:13}}>이번 주 내 총 근무</span>
+          <span style={{color:myH>=15?"#EF4444":"#F59E0B",fontWeight:800,fontFamily:"sans-serif",fontSize:20}}>{myH}h{myH>=15?" ⚠️":""}</span>
+        </div>
+      )}
+      {snap && (
+        <div style={{overflowX:"auto",borderRadius:10,border:"1px solid #334155"}}>
+          <table style={{borderCollapse:"collapse",minWidth:"max-content"}}>
+            <thead>
+              <tr>
+                <th rowSpan={2} style={{...TH,minWidth:72,position:"sticky",left:0,zIndex:3,borderRight:"2px solid #475569"}}>직원</th>
+                {week.map(day => {
+                  const wk=["토","일"].includes(day.label);
+                  return <th key={day.id} colSpan={4} style={{...TH,background:wk?"#2D1A0A":"#1E293B",color:wk?"#F87171":"#94A3B8",padding:"5px 6px"}}>{day.label} {day.date.slice(5)}</th>;
+                })}
+                <th rowSpan={2} style={{...TH,minWidth:44,color:"#F59E0B",borderLeft:"2px solid #475569"}}>합계</th>
+              </tr>
+              <tr>
+                {week.map(day => {
+                  const wk=["토","일"].includes(day.label);
+                  const sub={...TH,background:wk?"#2D1A0A":"#162030",fontSize:9,padding:"2px 4px",color:"#64748B"};
+                  return (
+                    <th key={day.id+"s"} style={{display:"contents"}}>
+                      <th style={{...sub,minWidth:40}}>출근</th>
+                      <th style={{...sub,minWidth:40}}>퇴근</th>
+                      <th style={{...sub,minWidth:26}}>휴식</th>
+                      <th style={{...sub,minWidth:30,color:"#F59E0B"}}>시간</th>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {emps.map((e,ei) => {
+                const isMe = e.id===emp.id;
+                const tot  = week.reduce((s,d) => s+calcH(getCell(snap,e.id,d.date)), 0);
+                return (
+                  <tr key={e.id} style={{background:isMe?"rgba(245,158,11,.06)":ei%2===0?"#0A0F18":"#0D1420"}}>
+                    <td style={{background:isMe?"rgba(245,158,11,.08)":"#1A2535",border:"1px solid #2D3748",borderRight:"2px solid #475569",padding:"4px 10px",position:"sticky",left:0,zIndex:1}}>
+                      <span style={{color:e.color,fontWeight:700,fontFamily:"sans-serif",fontSize:12,whiteSpace:"nowrap"}}>{isMe?"→ ":""}{e.name}</span>
+                    </td>
+                    {week.map(day => {
+                      const cell = getCell(snap,e.id,day.date);
+                      const h    = calcH(cell);
+                      const wk   = ["토","일"].includes(day.label);
+                      const isSub= !!(cell.substitute&&!cell.locked);
+                      const bg   = cell.off?"rgba(245,158,11,.22)":isSub?"rgba(239,68,68,.10)":wk?"rgba(239,68,68,.04)":"transparent";
+                      const td   = {background:bg,border:"1px solid #2D3748",padding:"3px 5px",textAlign:"center",fontSize:11,fontFamily:"sans-serif",whiteSpace:"nowrap"};
+                      if (cell.off) return (
+                        <th key={day.id} style={{display:"contents"}}>
+                          <td style={{...td,color:"#F59E0B",fontWeight:700,fontSize:10}}>휴무</td>
+                          <td style={td}/><td style={td}/><td style={td}/>
+                        </th>
+                      );
+                      return (
+                        <th key={day.id} style={{display:"contents"}}>
+                          <td style={{...td,color:"#CBD5E1",position:"relative"}}>
+                            {isSub&&<span style={{position:"absolute",top:1,left:2,fontSize:7,color:"#F87171"}}>⚠</span>}
+                            {cell.start||<span style={{color:"#2D3748"}}>-</span>}
+                          </td>
+                          <td style={{...td,color:"#CBD5E1"}}>{cell.end||""}</td>
+                          <td style={{...td,color:"#CBD5E1"}}>{cell.brk||""}</td>
+                          <td style={{...td,color:h>0?"#F59E0B":"#2D3748",fontWeight:h>0?700:400}}>{h||""}</td>
+                        </th>
+                      );
+                    })}
+                    <td style={{background:isMe?"rgba(245,158,11,.1)":"#1A2535",border:"1px solid #2D3748",borderLeft:"2px solid #475569",padding:"4px 8px",textAlign:"center"}}>
+                      <span style={{color:isMe?e.color:"#64748B",fontWeight:isMe?800:400,fontFamily:"sans-serif",fontSize:12}}>{tot>0?tot+"h":""}</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StaffNoticeView({data, upd, emp}) {
+  const notices = A(data.notices);
+  const readBy  = O(data.readBy);
+  function markRead(nId) {
+    const cur = A(readBy[nId]);
+    if (cur.includes(emp.id)) return;
+    upd("readBy", {...readBy, [nId]:[...cur,emp.id]});
+  }
+  const sorted = [...notices].sort((a,b) => (b.pinned?1:0)-(a.pinned?1:0) || new Date(b.createdAt)-new Date(a.createdAt));
+  return (
+    <div>
+      <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:"0 0 14px",fontSize:18}}>📢 공지사항</h2>
+      {sorted.length===0 && <p style={{color:"#475569",fontFamily:"sans-serif",textAlign:"center",padding:"40px 0"}}>공지사항이 없습니다</p>}
+      {sorted.map(n => {
+        const isRead = A(readBy[n.id]).includes(emp.id);
+        return (
+          <div key={n.id} style={{background:"#1E293B",borderRadius:12,padding:16,marginBottom:10,border:"1px solid "+(n.pinned?"rgba(245,158,11,.3)":"#334155")}}>
+            <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:6}}>
+              {n.pinned && <span>📌</span>}
+              <span style={{color:"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:14,flex:1}}>{n.title}</span>
+              {isRead && <span style={{background:"#D1FAE5",color:"#065F46",borderRadius:99,padding:"2px 8px",fontSize:11,fontWeight:700,fontFamily:"sans-serif",flexShrink:0}}>읽음 ✓</span>}
+            </div>
+            <p style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",margin:"0 0 8px"}}>{new Date(n.createdAt).toLocaleDateString("ko-KR")}</p>
+            {n.content && <p style={{color:"#CBD5E1",fontFamily:"sans-serif",fontSize:13,margin:"0 0 10px",whiteSpace:"pre-wrap",lineHeight:1.6}}>{n.content}</p>}
+            {A(n.attachments).map((f,i) => (
+              <div key={i} style={{marginBottom:8}}>
+                {f.type.startsWith("image") ? (
+                  <img src={f.data} alt={f.name} style={{maxWidth:"100%",maxHeight:300,borderRadius:8,display:"block"}}/>
+                ) : (
+                  <a href={f.data} download={f.name} style={{display:"inline-flex",alignItems:"center",gap:6,background:"#0F172A",borderRadius:8,padding:"8px 12px",color:"#38BDF8",fontSize:12,fontFamily:"sans-serif",textDecoration:"none"}}>
+                    📄 {f.name} 다운로드
+                  </a>
+                )}
+              </div>
+            ))}
+            {!isRead && <button onClick={()=>markRead(n.id)} style={{background:"linear-gradient(135deg,#10B981,#059669)",color:"#fff",fontWeight:700,fontFamily:"sans-serif",fontSize:12,padding:"7px 18px",borderRadius:8,border:"none",cursor:"pointer",marginTop:4}}>✓ 읽음 확인</button>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function StaffReqView({data, upd, emp, canReq}) {
+  const [selDate,    setSelDate]    = useState("");
+  const [mode,       setMode]       = useState("allday");
+  const [selShiftId, setSelShiftId] = useState("");
+  const [startT,     setStartT]     = useState("09:00");
+  const [endT,       setEndT]       = useState("18:00");
+  const [reason,     setReason]     = useState("");
+  const [done,       setDone]       = useState(false);
+  const [tab,        setTab]        = useState("one"); // "one" | "fixed"
+
+  const week    = A(data.week);
+  const reqs    = A(data.reqs);
+  const selDay  = week.find(d => d.date===selDate);
+  const selShift= selDay ? A(selDay.shifts).find(s => s.id===selShiftId) : null;
+  const myReqs  = reqs.filter(r => r.empId===emp.id).sort((a,b) => new Date(b.createdAt)-new Date(a.createdAt));
+
+  // 고정 휴무: employee.fixedOff = [0,1,...6] (0=일,1=월,...6=토)
+  const fixedOff = A((A(data.employees).find(e=>e.id===emp.id)||{}).fixedOff);
+  function toggleFixed(dow) {
+    const next = fixedOff.includes(dow) ? fixedOff.filter(d=>d!==dow) : [...fixedOff, dow];
+    upd("employees", A(data.employees).map(e => e.id===emp.id ? {...e,fixedOff:next} : e));
+  }
+  const DOW_KR = ["일","월","화","수","목","금","토"];
+
+  function submit() {
+    if (!selDate) return;
+    if (mode==="shift" && !selShiftId) return;
+    const allDay = mode==="allday";
+    const st = allDay ? "" : mode==="shift" ? (selShift?.start||"") : startT;
+    const en = allDay ? "" : mode==="shift" ? (selShift?.end||"")   : endT;
+    upd("reqs", [...reqs, {id:Date.now(), empId:emp.id, date:selDate, allDay, start:st, end:en, reason, status:"pending", createdAt:new Date().toISOString()}]);
+    setSelDate(""); setMode("allday"); setSelShiftId(""); setReason("");
+    setDone(true); setTimeout(()=>setDone(false), 3000);
+  }
+
+  if (!canReq) return (
+    <div style={{textAlign:"center",padding:"60px 0"}}>
+      <div style={{fontSize:52,marginBottom:12}}>🔒</div>
+      <h3 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:0}}>현재 신청 기간이 아닙니다</h3>
+    </div>
+  );
+
+  return (
+    <div>
+      <h2 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,margin:"0 0 14px",fontSize:18}}>📬 휴무 신청</h2>
+
+      {/* 탭 */}
+      <div style={{display:"flex",gap:4,marginBottom:14}}>
+        <button onClick={()=>setTab("one")}   style={{...S.btnG,flex:1,...(tab==="one"  ?{color:"#F59E0B",borderColor:"#F59E0B55",background:"rgba(245,158,11,.08)"}:{})}}>📅 날짜 신청</button>
+        <button onClick={()=>setTab("fixed")} style={{...S.btnG,flex:1,...(tab==="fixed"?{color:"#A78BFA",borderColor:"#A78BFA55",background:"rgba(167,139,250,.08)"}:{})}}>
+          🔁 고정 휴무{fixedOff.length>0&&<span style={{marginLeft:4,background:"#A78BFA",color:"#fff",borderRadius:99,padding:"0 5px",fontSize:10}}>{fixedOff.length}</span>}
+        </button>
+      </div>
+
+      {/* ── 날짜 신청 ── */}
+      {tab==="one" && (
+        <>
+          {done && (
+            <div style={{background:"#D1FAE5",border:"1px solid #A7F3D0",borderRadius:10,padding:14,marginBottom:14,textAlign:"center"}}>
+              <p style={{color:"#065F46",fontWeight:700,fontFamily:"sans-serif",fontSize:14,margin:0}}>✅ 신청이 접수됐습니다!</p>
+            </div>
+          )}
+          <div style={{background:"#1E293B",borderRadius:12,padding:18,border:"1px solid #334155",marginBottom:20}}>
+            <p style={S.lbl}>날짜 선택</p>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+              {week.map(day => {
+                const wk=["토","일"].includes(day.label); const isSel=selDate===day.date;
+                return (
+                  <button key={day.date} onClick={()=>{setSelDate(day.date);setMode("allday");setSelShiftId("");}}
+                    style={{background:isSel?(wk?"#7F1D1D":"#1D3A7F"):"#0F172A",border:"2px solid "+(isSel?(wk?"#F87171":"#38BDF8"):"#334155"),borderRadius:10,padding:"8px 10px",cursor:"pointer",textAlign:"center",minWidth:50}}>
+                    <p style={{color:wk?"#F87171":"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:13,margin:0}}>{day.label}</p>
+                    <p style={{color:"#64748B",fontSize:10,fontFamily:"sans-serif",margin:"2px 0 0"}}>{day.date.slice(5)}</p>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+              <span style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",whiteSpace:"nowrap"}}>직접 입력:</span>
+              <input type="date" value={selDate} onChange={e=>{setSelDate(e.target.value);setMode("allday");setSelShiftId("");}} style={{...S.inp,width:160}}/>
+            </div>
+            {selDate && (
+              <div style={{borderTop:"1px solid #334155",paddingTop:14}}>
+                <p style={S.lbl}>신청 유형</p>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+                  <button onClick={()=>{setMode("allday");setSelShiftId("");}}
+                    style={{background:mode==="allday"?"rgba(239,68,68,.15)":"#0F172A",border:"2px solid "+(mode==="allday"?"#F87171":"#334155"),borderRadius:10,padding:"10px 14px",cursor:"pointer",textAlign:"left",minWidth:80}}>
+                    <p style={{color:mode==="allday"?"#F87171":"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:13,margin:0}}>종일</p>
+                    <p style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",margin:"2px 0 0"}}>하루 전체</p>
+                  </button>
+                  {selDay && A(selDay.shifts).map(sh => (
+                    <button key={sh.id} onClick={()=>{setMode("shift");setSelShiftId(sh.id);}}
+                      style={{background:mode==="shift"&&selShiftId===sh.id?sh.color+"22":"#0F172A",border:"2px solid "+(mode==="shift"&&selShiftId===sh.id?sh.color:"#334155"),borderRadius:10,padding:"10px 14px",cursor:"pointer",textAlign:"left",minWidth:80}}>
+                      <p style={{color:mode==="shift"&&selShiftId===sh.id?sh.color:"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:13,margin:0}}>{sh.name}</p>
+                      <p style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",margin:"2px 0 0"}}>{sh.start}~{sh.end}</p>
+                    </button>
+                  ))}
+                  <button onClick={()=>setMode("custom")}
+                    style={{background:mode==="custom"?"rgba(56,189,248,.15)":"#0F172A",border:"2px solid "+(mode==="custom"?"#38BDF8":"#334155"),borderRadius:10,padding:"10px 14px",cursor:"pointer",textAlign:"left",minWidth:80}}>
+                    <p style={{color:mode==="custom"?"#38BDF8":"#E2E8F0",fontWeight:700,fontFamily:"sans-serif",fontSize:13,margin:0}}>⏱ 직접</p>
+                    <p style={{color:"#64748B",fontSize:11,fontFamily:"sans-serif",margin:"2px 0 0"}}>시간 입력</p>
+                  </button>
+                </div>
+                {mode==="custom" && (
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+                    <div><label style={S.lbl}>시작</label><input type="time" value={startT} onChange={e=>setStartT(e.target.value)} style={S.inp}/></div>
+                    <div><label style={S.lbl}>종료</label><input type="time" value={endT}   onChange={e=>setEndT(e.target.value)}   style={S.inp}/></div>
+                  </div>
+                )}
+                <p style={S.lbl}>사유 (선택)</p>
+                <input placeholder="신청 사유..." value={reason} onChange={e=>setReason(e.target.value)} style={{...S.inp,marginBottom:14}}/>
+                <div style={{background:"#0F172A",borderRadius:8,padding:"8px 12px",marginBottom:12}}>
+                  <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:0}}>
+                    신청: <span style={{color:"#E2E8F0",fontWeight:700}}>
+                      {selDate} · {mode==="allday"?"종일":mode==="shift"&&selShift?`${selShift.name} (${selShift.start}~${selShift.end})`:`${startT}~${endT}`}
+                    </span>
+                  </p>
+                </div>
+                <button onClick={submit} disabled={mode==="shift"&&!selShiftId}
+                  style={{...S.btnP,width:"100%",opacity:mode==="shift"&&!selShiftId?0.5:1}}>신청하기</button>
+              </div>
+            )}
+          </div>
+          <h3 style={{color:"#E2E8F0",fontFamily:"sans-serif",fontWeight:700,fontSize:15,margin:"0 0 10px"}}>신청 내역</h3>
+          {myReqs.length===0 && <p style={{color:"#475569",fontFamily:"sans-serif",textAlign:"center",padding:"20px 0"}}>내역 없음</p>}
+          {myReqs.map(req => {
+            const ss = RQS[req.status]||RQS.pending;
+            return (
+              <div key={req.id} style={{background:"#1E293B",borderRadius:10,padding:"12px 16px",marginBottom:6,border:"1px solid #334155",display:"flex",alignItems:"center",gap:10}}>
+                <div style={{flex:1}}>
+                  <p style={{color:"#CBD5E1",fontFamily:"sans-serif",fontSize:13,margin:"0 0 2px"}}>{req.date} {req.allDay?"종일":req.start+"~"+req.end}</p>
+                  {req.reason && <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:0}}>{req.reason}</p>}
+                </div>
+                <span style={{background:ss.bg,color:ss.tx,borderRadius:99,padding:"2px 10px",fontSize:11,fontWeight:700,fontFamily:"sans-serif",flexShrink:0}}>{ss.lb}</span>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {/* ── 고정 휴무 설정 ── */}
+      {tab==="fixed" && (
+        <div style={{background:"#1E293B",borderRadius:12,padding:18,border:"1px solid #A78BFA33"}}>
+          <p style={{color:"#A78BFA",fontWeight:700,fontFamily:"sans-serif",fontSize:14,margin:"0 0 6px"}}>🔁 매주 고정 휴무</p>
+          <p style={{color:"#64748B",fontSize:12,fontFamily:"sans-serif",margin:"0 0 16px"}}>선택한 요일은 매주 자동으로 휴무 처리되어 자동 생성 시 배정에서 제외됩니다. 관리자에게 바로 저장돼요.</p>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+            {DOW_KR.map((lb,dow) => {
+              const sel = fixedOff.includes(dow);
+              const wk  = dow===0||dow===6;
+              return (
+                <button key={dow} onClick={()=>toggleFixed(dow)}
+                  style={{padding:"12px 16px",borderRadius:12,border:"2px solid "+(sel?(wk?"#F87171":"#A78BFA"):"#334155"),background:sel?(wk?"rgba(248,113,113,.15)":"rgba(167,139,250,.15)"):"#0F172A",cursor:"pointer",textAlign:"center",minWidth:56}}>
+                  <p style={{color:sel?(wk?"#F87171":"#A78BFA"):"#64748B",fontWeight:700,fontFamily:"sans-serif",fontSize:16,margin:0}}>{lb}</p>
+                  {sel && <p style={{color:wk?"#F87171":"#A78BFA",fontSize:10,fontFamily:"sans-serif",margin:"3px 0 0",fontWeight:600}}>휴무</p>}
+                </button>
+              );
+            })}
+          </div>
+          {fixedOff.length>0 ? (
+            <div style={{background:"#0F172A",borderRadius:8,padding:"10px 14px"}}>
+              <p style={{color:"#A78BFA",fontSize:13,fontFamily:"sans-serif",fontWeight:700,margin:0}}>
+                매주 {fixedOff.sort((a,b)=>a-b).map(d=>DOW_KR[d]+"요일").join(", ")} 고정 휴무
+              </p>
+            </div>
+          ) : (
+            <p style={{color:"#475569",fontSize:13,fontFamily:"sans-serif",textAlign:"center",padding:"8px 0",margin:0}}>선택된 요일 없음</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── 앱 렌더링 ─────────────────────────────────────────────────────────────────
+const _loading = document.getElementById("loading");
+if (_loading) _loading.style.display = "none";
+const reactRoot = ReactDOM.createRoot(document.getElementById("root"));
+reactRoot.render(<App/>);
+</script>
+
+</body>
+</html>
