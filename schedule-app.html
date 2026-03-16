@@ -584,7 +584,7 @@ function SchedTab({data, upd}) {
       const cells = week.flatMap(d => {
         const c = getDisplayCell(emp.id, d.date);
         if (isAllDayLeave(emp.id, d.date)) return ["","","",""];
-        if (c.off) return ["휴무","","",""];
+        if (c.off) return ["","","",""];
         if (!c.start) return ["","","",""];
         const h = calcH(c);
         return [c.start, c.end, c.brk ? `${c.brk}분` : "-", h];
